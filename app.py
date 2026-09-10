@@ -10,7 +10,7 @@ from flask import Flask, redirect, render_template_string, request, send_file, s
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
-BANCO = os.environ.get("DATABASE", "sp_aguas.db")
+BANCO = os.environ.get("DATABASE", "/tmp/sp_aguas.db" if os.environ.get("VERCEL") else "sp_aguas.db")
 
 
 def conectar():

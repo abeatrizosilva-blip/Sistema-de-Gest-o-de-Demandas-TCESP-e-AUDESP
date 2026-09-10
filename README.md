@@ -26,4 +26,8 @@ python app.py
 
 Tambem e possivel executar `iniciar_sistema.bat` depois de criar o ambiente virtual e instalar as dependencias.
 
-O banco SQLite e criado automaticamente como `sp_aguas.db`. Para usar outro arquivo, defina a variavel de ambiente `DATABASE` antes de iniciar.
+O banco SQLite e criado automaticamente como `sp_aguas.db`. Para usar outro arquivo local, defina a variavel de ambiente `DATABASE` antes de iniciar.
+
+### Vercel
+
+O arquivo `vercel.json` configura o Flask como uma funcao Python. Na Vercel, o SQLite usa `/tmp` apenas para permitir a inicializacao; esse armazenamento e temporario e pode ser apagado entre execucoes. Portanto, a Vercel pode servir para testes, mas nao para manter usuarios e demandas com a implementacao atual. Para producao, e necessario adaptar o aplicativo para um banco externo antes de publicar.
