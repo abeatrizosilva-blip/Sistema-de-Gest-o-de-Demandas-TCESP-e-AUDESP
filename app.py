@@ -43,6 +43,10 @@ def criar_banco():
 			acao TEXT, descricao TEXT, data_hora TEXT NOT NULL
 		);
 	""")
+	colunas_demandas = {linha[1] for linha in conn.execute("PRAGMA table_info(demandas)")}
+	for coluna, definicao in (("criado_por", "INTEGER"), ("atualizado_em", "TEXT")):
+		if coluna not in colunas_demandas:
+			conn.execute(f"ALTER TABLE demandas ADD COLUMN {coluna} {definicao}")
 	conn.commit()
 	conn.close()
 
@@ -213,7 +217,7 @@ def sistema():
 def nova_demanda():
 	if (resposta := acesso_login()): return resposta
 	if request.method == "POST":
-		valores = ler_demanda_form(); conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); conn.commit(); conn.close(); registrar_historico(cur.lastrowid, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
+		valores = ler_demanda_form(); conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); demanda_id = cur.lastrowid; conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
 	return pagina("Nova demanda", formulario())
 
 
