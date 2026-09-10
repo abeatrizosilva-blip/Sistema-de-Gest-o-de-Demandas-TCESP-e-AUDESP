@@ -1,3 +1,4 @@
 Flask
 bcrypt
 openpyxl
+gunicorn
