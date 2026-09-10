@@ -2,3 +2,4 @@ Flask
 bcrypt
 openpyxl
 gunicorn
+psycopg[binary]

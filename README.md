@@ -30,4 +30,8 @@ O banco SQLite e criado automaticamente como `sp_aguas.db`. Para usar outro arqu
 
 ### Vercel
 
-O arquivo `vercel.json` configura o Flask como uma funcao Python. Na Vercel, o SQLite usa `/tmp` apenas para permitir a inicializacao; esse armazenamento e temporario e pode ser apagado entre execucoes. Portanto, a Vercel pode servir para testes, mas nao para manter usuarios e demandas com a implementacao atual. Para producao, e necessario adaptar o aplicativo para um banco externo antes de publicar.
+O arquivo `vercel.json` configura o Flask como uma funcao Python. Com `DATABASE_URL` configurada, a Vercel usa o Neon PostgreSQL e os dados ficam persistentes. Sem essa variavel, o aplicativo usa SQLite em `/tmp` apenas para testes; esse armazenamento e temporario e pode ser apagado entre execucoes.
+
+### Neon PostgreSQL
+
+O aplicativo usa Neon quando a variavel `DATABASE_URL` estiver configurada. Na Vercel, adicione essa variavel com a connection string do Neon e publique novamente. Nunca coloque essa string diretamente no codigo ou no Git.
