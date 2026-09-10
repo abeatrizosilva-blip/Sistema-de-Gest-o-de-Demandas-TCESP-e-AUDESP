@@ -1,1 +1,359 @@
+from datetime import date, datetime
+import io
+import os
+import socket
+import sqlite3
+
+import bcrypt
+from flask import Flask, redirect, render_template_string, request, send_file, session, url_for
+
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
+BANCO = os.environ.get("DATABASE", "sp_aguas.db")
+
+
+def conectar():
+	conn = sqlite3.connect(BANCO)
+	conn.row_factory = sqlite3.Row
+	return conn
+
+
+def agora():
+	return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def criar_banco():
+	conn = conectar()
+	conn.executescript("""
+		CREATE TABLE IF NOT EXISTS usuarios (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
+			usuario TEXT NOT NULL UNIQUE, email TEXT UNIQUE, senha_hash TEXT NOT NULL,
+			perfil TEXT NOT NULL DEFAULT 'Usuario', ativo INTEGER NOT NULL DEFAULT 1,
+			aprovado INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS demandas (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, origem TEXT NOT NULL,
+			assunto TEXT NOT NULL, area TEXT, responsavel TEXT, data_recebimento TEXT,
+			prazo_area TEXT, prazo_fatal TEXT, situacao TEXT, prioridade TEXT, observacoes TEXT,
+			criado_por INTEGER, criado_em TEXT NOT NULL, atualizado_em TEXT
+		);
+		CREATE TABLE IF NOT EXISTS historico (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, demanda_id INTEGER, usuario_id INTEGER,
+			acao TEXT, descricao TEXT, data_hora TEXT NOT NULL
+		);
+	""")
+	conn.commit()
+	conn.close()
+
+
+def data_br(valor):
+	if not valor:
+		return "-"
+	try:
+		return datetime.strptime(valor, "%Y-%m-%d").strftime("%d/%m/%Y")
+	except (TypeError, ValueError):
+		return valor
+
+
+def calcular_prazos(prazo_area, prazo_fatal):
+	resultado = {"dias_entre": None, "dias_area": None, "dias_fatal": None, "status": "Sem prazo"}
+	try:
+		fatal = datetime.strptime(prazo_fatal, "%Y-%m-%d").date()
+		resultado["dias_fatal"] = (fatal - date.today()).days
+	except (TypeError, ValueError):
+		pass
+	try:
+		area = datetime.strptime(prazo_area, "%Y-%m-%d").date()
+		resultado["dias_area"] = (area - date.today()).days
+	except (TypeError, ValueError):
+		pass
+	try:
+		area = datetime.strptime(prazo_area, "%Y-%m-%d").date()
+		fatal = datetime.strptime(prazo_fatal, "%Y-%m-%d").date()
+		resultado["dias_entre"] = (fatal - area).days
+	except (TypeError, ValueError):
+		pass
+	dias = resultado["dias_fatal"]
+	if dias is not None:
+		resultado["status"] = "VENCIDO" if dias < 0 else "CRÍTICO" if dias <= 3 else "PRÓXIMO" if dias <= 7 else "NORMAL"
+	return resultado
+
+
+def registrar_historico(demanda_id, usuario_id, acao, descricao):
+	conn = conectar()
+	conn.execute("INSERT INTO historico (demanda_id, usuario_id, acao, descricao, data_hora) VALUES (?, ?, ?, ?, ?)",
+				 (demanda_id, usuario_id, acao, descricao, agora()))
+	conn.commit()
+	conn.close()
+
+
+def usuario_logado():
+	return "usuario_id" in session
+
+
+def administrador():
+	return session.get("perfil") == "Administrador"
+
+
+HTML_BASE = """
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ titulo or 'SP ÁGUAS' }}</title><style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f3f6f9;color:#263238}header{background:linear-gradient(135deg,#005b96,#0077b6);color:#fff;padding:18px 30px;box-shadow:0 2px 8px #0003}.logo{font-size:22px;font-weight:bold}.menu{margin-top:15px}.menu a{color:#fff;text-decoration:none;margin-right:18px;font-size:14px}.container{max-width:1400px;margin:auto;padding:25px}.card,.metrica{background:#fff;border-radius:12px;padding:22px;margin-bottom:22px;box-shadow:0 2px 8px #0001}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:15px}.metrica strong{display:block;font-size:30px;margin-top:10px;color:#005b96}.metrica h3{margin:0;color:#607d8b;font-size:14px}input,select,textarea{width:100%;padding:11px;border:1px solid #cfd8dc;border-radius:6px;margin:6px 0 15px;font-size:14px}textarea{min-height:100px}label{font-weight:bold;font-size:13px}button,.btn{background:#0077b6;color:#fff;border:0;border-radius:6px;padding:10px 16px;cursor:pointer;text-decoration:none;display:inline-block}.btn-verde{background:#2e7d32}.btn-vermelho{background:#c62828}.btn-cinza{background:#607d8b}table{width:100%;border-collapse:collapse;background:#fff}th{background:#005b96;color:#fff;padding:11px;text-align:left}td{padding:10px;border-bottom:1px solid #e0e0e0;font-size:13px}.alerta{padding:15px;border-radius:8px;margin-bottom:10px}.vencido{background:#ffebee;color:#b71c1c}.critico{background:#fff3e0;color:#e65100}.proximo{background:#fffde7;color:#827717}.normal{background:#e8f5e9;color:#1b5e20}.info{background:#e3f2fd;color:#0d47a1}.erro{background:#ffebee;color:#b71c1c;padding:12px;border-radius:6px}@media(max-width:800px){.container{padding:12px}table{display:block;overflow-x:auto}}
+</style></head><body><header><div class="logo">SP ÁGUAS</div>{% if session.get('usuario_id') %}<div>Sistema de Gestão de Processos e Prazos</div><div class="menu"><a href="/sistema">Dashboard</a><a href="/demandas">Demandas</a><a href="/nova-demanda">Nova demanda</a><a href="/tce">TCE-SP</a><a href="/audesp">AUDESP</a><a href="/alertas">Alertas</a><a href="/calendario">Calendário</a><a href="/exportar">Exportar</a>{% if session.get('perfil') == 'Administrador' %}<a href="/usuarios">Usuários</a><a href="/status">Status</a>{% endif %}<a href="/logout">Sair</a></div>{% endif %}</header><main class="container">{{ conteudo|safe }}</main></body></html>
+"""
+
+
+def pagina(titulo, conteudo):
+	estilo_moderno = """
+	<style>
+	:root { --azul-escuro: #073b5c; --azul: #087e9f; --fundo: #f4f7f9; --borda: #dce6eb; --texto: #20333f; --suave: #71828d; --sombra: 0 10px 30px rgba(21, 55, 75, .08); }
+	body { background: var(--fundo); color: var(--texto); font-family: Inter, "Segoe UI", sans-serif; }
+	header { position: fixed; inset: 0 auto 0 0; width: 250px; min-height: 100vh; padding: 28px 16px; background: linear-gradient(180deg, #073b5c 0%, #087e9f 100%); box-shadow: 6px 0 24px rgba(7, 59, 92, .14); z-index: 10; }
+	.logo { padding: 8px 12px 28px; font-size: 21px; letter-spacing: .4px; }
+	header > div:not(.logo) { padding: 0 12px; color: rgba(255,255,255,.7); font-size: 12px; line-height: 1.5; }
+	.menu { display: flex; flex-direction: column; gap: 5px; margin-top: 24px; }
+	.menu a { margin: 0; padding: 11px 12px; border-radius: 9px; color: rgba(255,255,255,.86); font-size: 13px; transition: background .2s, transform .2s; }
+	.menu a:hover { background: rgba(255,255,255,.14); transform: translateX(3px); }
+	.container { max-width: none; min-height: 100vh; margin-left: 250px; padding: 38px 42px; }
+	.card, .metrica { border: 1px solid var(--borda); border-radius: 14px; box-shadow: var(--sombra); }
+	.card h1 { margin-top: 0; color: var(--azul-escuro); font-size: 27px; }
+	.card h2 { color: var(--azul-escuro); font-size: 18px; }
+	.grid { gap: 18px; }
+	.metrica { padding: 22px; }
+	.metrica h3 { text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
+	.metrica strong { color: var(--azul); font-size: 32px; }
+	input, select, textarea { border-color: var(--borda); background: #fbfdfe; border-radius: 8px; font-family: inherit; }
+	input:focus, select:focus, textarea:focus { outline: 0; border-color: var(--azul); box-shadow: 0 0 0 3px rgba(8,126,159,.14); background: #fff; }
+	button, .btn { border-radius: 8px; font-weight: 600; background: var(--azul); transition: transform .2s, box-shadow .2s, background .2s; }
+	button:hover, .btn:hover { background: #066b88; box-shadow: 0 5px 12px rgba(8,126,159,.2); transform: translateY(-1px); }
+	th { background: #f5f8fa; color: #60727d; font-size: 11px; text-transform: uppercase; letter-spacing: .45px; border-bottom: 1px solid var(--borda); }
+	td { padding: 13px 10px; }
+	.alerta { border-left: 4px solid transparent; box-shadow: 0 2px 8px rgba(21,55,75,.04); }
+	.vencido { border-left-color: #c62828; } .critico { border-left-color: #e66a00; } .proximo { border-left-color: #c18a05; } .normal { border-left-color: #2e7d32; }
+	@media (max-width: 760px) { header { position: relative; width: 100%; min-height: auto; padding: 16px; } header > div:not(.logo) { padding: 0; } .logo { padding: 4px 0 14px; } .menu { flex-direction: row; flex-wrap: wrap; margin-top: 14px; } .menu a { padding: 8px 9px; } .container { margin-left: 0; padding: 20px 12px; } }
+	</style>
+	"""
+	return render_template_string(HTML_BASE, titulo=titulo, conteudo=estilo_moderno + conteudo)
+
+
+def acesso_login():
+	return redirect(url_for("login")) if not usuario_logado() else None
+
+
+@app.route("/configurar", methods=["GET", "POST"])
+def configurar():
+	conn = conectar()
+	total = conn.execute("SELECT COUNT(*) total FROM usuarios").fetchone()["total"]
+	conn.close()
+	if total:
+		return redirect(url_for("login"))
+	if request.method == "POST":
+		nome, usuario, senha = request.form["nome"].strip(), request.form["usuario"].strip(), request.form["senha"]
+		if len(senha) < 8:
+			return pagina("Configuração", '<div class="card"><div class="erro">A senha precisa ter pelo menos 8 caracteres.</div></div>')
+		conn = conectar()
+		conn.execute("INSERT INTO usuarios (nome, usuario, senha_hash, perfil, ativo, aprovado, criado_em) VALUES (?, ?, ?, ?, 1, 1, ?)",
+					 (nome, usuario, bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), "Administrador", agora()))
+		conn.commit(); conn.close()
+		return redirect(url_for("login"))
+	return pagina("Configuração inicial", '<div class="card" style="max-width:500px;margin:auto"><h1>SP ÁGUAS</h1><h2>Configuração inicial</h2><p>Crie o primeiro usuário administrador.</p><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>Senha</label><input type="password" name="senha" minlength="8" required><button>Criar administrador</button></form></div>')
+
+
+@app.route("/", methods=["GET", "POST"])
+def login():
+	conn = conectar(); total = conn.execute("SELECT COUNT(*) total FROM usuarios").fetchone()["total"]
+	if not total:
+		conn.close(); return redirect(url_for("configurar"))
+	if request.method == "POST":
+		user = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (request.form["usuario"].strip(),)).fetchone(); conn.close()
+		if not user or not user["ativo"] or not user["aprovado"] or not bcrypt.checkpw(request.form["senha"].encode(), user["senha_hash"].encode()):
+			return pagina("Login", '<div class="card" style="max-width:420px;margin:auto"><div class="erro">Usuário ou senha inválidos, ou acesso ainda não liberado.</div><br><a class="btn" href="/">Voltar</a></div>')
+		session.update(usuario_id=user["id"], nome=user["nome"], usuario=user["usuario"], perfil=user["perfil"])
+		return redirect(url_for("sistema"))
+	conn.close()
+	return pagina("Login", '<div class="card" style="max-width:420px;margin:70px auto"><h1>SP ÁGUAS</h1><p>Gestão de Processos e Prazos</p><form method="post"><label>Usuário</label><input name="usuario" required><label>Senha</label><input type="password" name="senha" required><button style="width:100%">ENTRAR</button></form><hr><a href="/cadastro" class="btn">Criar minha conta</a></div>')
+
+
+@app.route("/cadastro", methods=["GET", "POST"])
+def cadastro():
+	if request.method == "POST":
+		nome, usuario, email = request.form["nome"].strip(), request.form["usuario"].strip(), request.form["email"].strip()
+		senha = request.form["senha"]
+		if senha != request.form["confirmar"]: erro = "As senhas não coincidem."
+		elif len(senha) < 8: erro = "A senha precisa ter pelo menos 8 caracteres."
+		else:
+			try:
+				conn = conectar(); conn.execute("INSERT INTO usuarios (nome, usuario, email, senha_hash, criado_em) VALUES (?, ?, ?, ?, ?)", (nome, usuario, email, bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), agora())); conn.commit(); conn.close()
+				return pagina("Cadastro realizado", '<div class="card"><h1>Cadastro realizado</h1><p>Aguarde a aprovação do administrador.</p><a class="btn" href="/">Voltar ao login</a></div>')
+			except sqlite3.IntegrityError: erro = "Usuário ou e-mail já cadastrado."
+		return pagina("Cadastro", f'<div class="card"><div class="erro">{erro}</div><a href="/cadastro" class="btn">Voltar</a></div>')
+	return pagina("Cadastro", '<div class="card" style="max-width:550px;margin:auto"><h2>Criar acesso ao sistema</h2><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>E-mail</label><input type="email" name="email" required><label>Senha</label><input type="password" name="senha" minlength="8" required><label>Confirmar senha</label><input type="password" name="confirmar" minlength="8" required><button>Criar minha conta</button></form></div>')
+
+
+def ler_demanda_form():
+	return tuple(request.form.get(c, "").strip() for c in ("numero", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes"))
+
+
+@app.route("/sistema")
+def sistema():
+	if (resposta := acesso_login()): return resposta
+	conn = conectar(); registros = conn.execute("SELECT * FROM demandas ORDER BY prazo_fatal").fetchall(); conn.close()
+	contagens = {"total": len(registros), "tce": sum(d["origem"] == "TCE-SP" for d in registros), "audesp": sum(d["origem"] == "AUDESP" for d in registros), "concluidas": sum(d["situacao"] == "Concluído" for d in registros), "VENCIDO": 0, "CRÍTICO": 0, "PRÓXIMO": 0, "NORMAL": 0}
+	for d in registros:
+		if d["situacao"] != "Concluído": contagens[calcular_prazos(d["prazo_area"], d["prazo_fatal"])["status"]] += 1
+	cards = [("Total de demandas", "total"), ("TCE-SP", "tce"), ("AUDESP", "audesp"), ("Vencidas", "VENCIDO"), ("Críticas", "CRÍTICO"), ("Próximas", "PRÓXIMO"), ("Normais", "NORMAL"), ("Concluídas", "concluidas")]
+	html = f'<h1>Dashboard</h1><p>Bem-vindo, <strong>{session["nome"]}</strong>. Perfil: <strong>{session["perfil"]}</strong></p><div class="grid">' + ''.join(f'<div class="metrica"><h3>{nome}</h3><strong>{contagens[chave]}</strong></div>' for nome, chave in cards) + '</div><div class="card"><h2>Próximos prazos</h2>'
+	proximos = sorted(((d, calcular_prazos(d["prazo_area"], d["prazo_fatal"])) for d in registros if d["situacao"] != "Concluído" and calcular_prazos(d["prazo_area"], d["prazo_fatal"])["dias_fatal"] is not None), key=lambda item: item[1]["dias_fatal"])
+	html += ''.join(f'<div class="alerta {p["status"].lower()}"><strong>{d["numero_processo"] or "Sem número"}</strong> — {d["assunto"]}<br>Prazo fatal: <strong>{data_br(d["prazo_fatal"])}</strong> | Dias restantes: <strong>{p["dias_fatal"]}</strong> | <a href="/editar/{d["id"]}">Editar</a></div>' for d, p in proximos[:10]) + '</div>'
+	return pagina("Dashboard", html)
+
+
+@app.route("/nova-demanda", methods=["GET", "POST"])
+def nova_demanda():
+	if (resposta := acesso_login()): return resposta
+	if request.method == "POST":
+		valores = ler_demanda_form(); conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); conn.commit(); conn.close(); registrar_historico(cur.lastrowid, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
+	return pagina("Nova demanda", formulario())
+
+
+def formulario(demanda=None):
+	valor = lambda nome: (demanda[nome] or "") if demanda else ""
+	return f'<div class="card"><h1>{"Editar demanda" if demanda else "Nova demanda"}</h1><form method="post"><div class="grid"><div><label>Número do processo</label><input name="numero" value="{valor("numero_processo")}"></div><div><label>Origem</label><select name="origem"><option>TCE-SP</option><option>AUDESP</option><option>Outro</option></select></div><div><label>Data de recebimento</label><input type="date" name="data_recebimento" value="{valor("data_recebimento")}"></div><div><label>Área</label><input name="area" value="{valor("area")}"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}"></div><div><label>Prioridade</label><select name="prioridade"><option>Normal</option><option>Alta</option><option>Urgente</option></select></div><div><label>Prazo da área</label><input type="date" name="prazo_area" value="{valor("prazo_area")}"></div><div><label>Prazo fatal</label><input type="date" name="prazo_fatal" value="{valor("prazo_fatal")}" required></div><div><label>Situação</label><select name="situacao"><option>Aberto</option><option>Em análise</option><option>Aguardando área</option><option>Aguardando documento</option><option>Respondido</option><option>Concluído</option></select></div></div><label>Assunto</label><textarea name="assunto" required>{valor("assunto")}</textarea><label>Observações</label><textarea name="observacoes">{valor("observacoes")}</textarea><button>Salvar</button> <a class="btn btn-cinza" href="/demandas">Cancelar</a></form></div>'
+
+
+@app.route("/demandas")
+def demandas():
+	if (resposta := acesso_login()): return resposta
+	busca, origem = request.args.get("busca", "").strip(), request.args.get("origem", "")
+	conn = conectar(); sql = "SELECT * FROM demandas WHERE 1=1"; params = []
+	if busca: sql += " AND (numero_processo LIKE ? OR assunto LIKE ? OR area LIKE ? OR responsavel LIKE ?)"; params += [f"%{busca}%"] * 4
+	if origem: sql += " AND origem = ?"; params.append(origem)
+	registros = conn.execute(sql + " ORDER BY prazo_fatal", params).fetchall(); conn.close()
+	linhas = ''.join(f'<tr><td>{d["id"]}</td><td>{d["numero_processo"] or "-"}</td><td>{d["origem"]}</td><td>{d["assunto"]}</td><td>{d["area"] or "-"}</td><td>{d["responsavel"] or "-"}</td><td>{data_br(d["prazo_fatal"])}</td><td>{d["situacao"]}</td><td><a class="btn" href="/editar/{d["id"]}">Editar</a></td></tr>' for d in registros)
+	return pagina("Demandas", f'<div class="card"><h1>Demandas</h1><form method="get"><input name="busca" value="{busca}" placeholder="Processo, assunto, área..."><button>Pesquisar</button></form></div><div class="card" style="overflow-x:auto"><table><tr><th>ID</th><th>Processo</th><th>Origem</th><th>Assunto</th><th>Área</th><th>Responsável</th><th>Prazo fatal</th><th>Situação</th><th>Ações</th></tr>{linhas}</table></div>')
+
+
+@app.route("/editar/<int:id>", methods=["GET", "POST"])
+def editar(id):
+	if (resposta := acesso_login()): return resposta
+	conn = conectar(); demanda = conn.execute("SELECT * FROM demandas WHERE id = ?", (id,)).fetchone()
+	if not demanda: conn.close(); return "Demanda não encontrada.", 404
+	if request.method == "POST":
+		valores = ler_demanda_form(); conn.execute("UPDATE demandas SET numero_processo=?, origem=?, assunto=?, area=?, responsavel=?, data_recebimento=?, prazo_area=?, prazo_fatal=?, situacao=?, prioridade=?, observacoes=?, atualizado_em=? WHERE id=?", (*valores, agora(), id)); conn.commit(); conn.close(); registrar_historico(id, session["usuario_id"], "EDICAO", "Demanda alterada."); return redirect(url_for("demandas"))
+	conn.close(); return pagina("Editar demanda", formulario(demanda))
+
+
+@app.route("/excluir/<int:id>", methods=["POST"])
+def excluir(id):
+	if not administrador(): return "Acesso negado.", 403
+	conn = conectar(); conn.execute("DELETE FROM demandas WHERE id = ?", (id,)); conn.execute("DELETE FROM historico WHERE demanda_id = ?", (id,)); conn.commit(); conn.close(); return redirect(url_for("demandas"))
+
+
+@app.route("/alertas")
+def alertas():
+	if (resposta := acesso_login()): return resposta
+	conn = conectar(); registros = conn.execute("SELECT * FROM demandas WHERE situacao != 'Concluído' ORDER BY prazo_fatal").fetchall(); conn.close()
+	html = '<div class="card"><h1>Alertas de prazos</h1>'
+	for d in registros:
+		p = calcular_prazos(d["prazo_area"], d["prazo_fatal"])
+		if p["status"] != "NORMAL": html += f'<div class="alerta {p["status"].lower()}"><strong>{p["status"]}</strong> — {d["numero_processo"] or "-"} — {d["assunto"]}<br>Prazo fatal: {data_br(d["prazo_fatal"])} | Dias restantes: {p["dias_fatal"]} <a class="btn" href="/editar/{d["id"]}">Abrir</a></div>'
+	return pagina("Alertas", html + '</div>')
+
+
+@app.route("/usuarios", methods=["GET", "POST"])
+def usuarios():
+	if not administrador(): return "Acesso negado.", 403
+	if request.method == "POST":
+		acao, usuario_id = request.form["acao"], request.form["usuario_id"]; conn = conectar()
+		if acao == "aprovar": conn.execute("UPDATE usuarios SET aprovado=1, ativo=1 WHERE id=?", (usuario_id,))
+		elif acao == "bloquear": conn.execute("UPDATE usuarios SET ativo=0 WHERE id=?", (usuario_id,))
+		elif acao == "ativar": conn.execute("UPDATE usuarios SET ativo=1, aprovado=1 WHERE id=?", (usuario_id,))
+		conn.commit(); conn.close()
+	conn = conectar(); lista = conn.execute("SELECT * FROM usuarios ORDER BY nome").fetchall(); conn.close()
+	linhas = ''.join(f'<tr><td>{u["nome"]}</td><td>{u["usuario"]}</td><td>{u["email"] or "-"}</td><td>{u["perfil"]}</td><td>{"Aprovado" if u["aprovado"] else "Pendente"}</td><td>{"Ativo" if u["ativo"] else "Bloqueado"}</td><td><form method="post"><input type="hidden" name="usuario_id" value="{u["id"]}"><input type="hidden" name="acao" value="{"bloquear" if u["ativo"] else "ativar"}"><button>{"Bloquear" if u["ativo"] else "Ativar"}</button></form></td></tr>' for u in lista)
+	return pagina("Usuários", f'<div class="card"><h1>Usuários</h1><table><tr><th>Nome</th><th>Usuário</th><th>E-mail</th><th>Perfil</th><th>Aprovação</th><th>Status</th><th>Ação</th></tr>{linhas}</table></div>')
+
+
+def tabela_por_origem(titulo, origem):
+	conn = conectar()
+	registros = conn.execute("SELECT * FROM demandas WHERE origem = ? ORDER BY prazo_fatal", (origem,)).fetchall()
+	conn.close()
+	linhas = ""
+	for demanda in registros:
+		prazo = calcular_prazos(demanda["prazo_area"], demanda["prazo_fatal"])
+		classe = {"VENCIDO": "vencido", "CRÍTICO": "critico", "PRÓXIMO": "proximo", "NORMAL": "normal"}.get(prazo["status"], "info")
+		linhas += f'<tr><td>{demanda["numero_processo"] or "-"}</td><td>{demanda["assunto"]}</td><td>{demanda["area"] or "-"}</td><td>{demanda["responsavel"] or "-"}</td><td>{data_br(demanda["prazo_fatal"])}</td><td><span class="alerta {classe}">{prazo["status"]}</span></td><td><a class="btn" href="/editar/{demanda["id"]}">Abrir</a></td></tr>'
+	conteudo = f'<div class="card"><h1>{titulo}</h1><p>Demandas classificadas como {origem}.</p><div style="overflow-x:auto"><table><tr><th>Processo</th><th>Assunto</th><th>Área</th><th>Responsável</th><th>Prazo fatal</th><th>Situação</th><th>Ação</th></tr>{linhas}</table></div></div>'
+	return pagina(titulo, conteudo)
+
+
+@app.route("/tce")
+def tce():
+	if (resposta := acesso_login()):
+		return resposta
+	return tabela_por_origem("TCE-SP", "TCE-SP")
+
+
+@app.route("/audesp")
+def audesp():
+	if (resposta := acesso_login()):
+		return resposta
+	return tabela_por_origem("AUDESP", "AUDESP")
+
+
+@app.route("/calendario")
+def calendario():
+	if (resposta := acesso_login()):
+		return resposta
+	hoje = date.today()
+	conn = conectar()
+	registros = conn.execute("SELECT * FROM demandas WHERE prazo_fatal IS NOT NULL ORDER BY prazo_fatal").fetchall()
+	conn.close()
+	eventos = {}
+	for demanda in registros:
+		try:
+			prazo = datetime.strptime(demanda["prazo_fatal"], "%Y-%m-%d").date()
+			if prazo.year == hoje.year and prazo.month == hoje.month:
+				eventos.setdefault(prazo.day, []).append(demanda)
+		except (TypeError, ValueError):
+			continue
+	import calendar as calendario_lib
+	primeiro_dia, total_dias = calendario_lib.monthrange(hoje.year, hoje.month)
+	cabecalho = "".join(f"<div><strong>{nome}</strong></div>" for nome in ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"))
+	celulas = "<div></div>" * primeiro_dia
+	for dia in range(1, total_dias + 1):
+		itens = "".join(f'<div style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="/editar/{item["id"]}">{item["numero_processo"] or item["assunto"][:20]}</a></div>' for item in eventos.get(dia, [])[:3])
+		celulas += f'<div class="card" style="min-height:100px;margin:0"><strong>{dia}</strong>{itens}</div>'
+	conteudo = f'<div class="card"><h1>Calendário</h1><h2>{hoje.strftime("%m/%Y")}</h2><div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px">{cabecalho}{celulas}</div></div>'
+	return pagina("Calendário", conteudo)
+
+
+@app.route("/exportar")
+def exportar():
+	if (resposta := acesso_login()): return resposta
+	from openpyxl import Workbook
+	conn = conectar(); dados = conn.execute("SELECT * FROM demandas ORDER BY prazo_fatal").fetchall(); conn.close(); wb = Workbook(); ws = wb.active; ws.title = "Demandas"
+	ws.append(["ID", "Processo", "Origem", "Assunto", "Área", "Responsável", "Prazo área", "Prazo fatal", "Dias entre", "Dias restantes", "Situação", "Prioridade", "Observações"])
+	for d in dados:
+		p = calcular_prazos(d["prazo_area"], d["prazo_fatal"]); ws.append([d["id"], d["numero_processo"], d["origem"], d["assunto"], d["area"], d["responsavel"], data_br(d["prazo_area"]), data_br(d["prazo_fatal"]), p["dias_entre"], p["dias_fatal"], d["situacao"], d["prioridade"], d["observacoes"]])
+	arquivo = io.BytesIO(); wb.save(arquivo); arquivo.seek(0); return send_file(arquivo, as_attachment=True, download_name="SP_AGUAS_Demandas.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/status")
+def status():
+	if (resposta := acesso_login()): return resposta
+	conn = conectar(); conn.execute("SELECT 1").fetchone(); conn.close(); ip = socket.gethostbyname(socket.gethostname())
+	return pagina("Status", f'<div class="card"><h1>Status do sistema</h1><div class="alerta normal">Aplicação: <strong>OPERACIONAL</strong></div><p>Acesso local: http://{ip}:5000</p></div>')
+
+
+@app.route("/logout")
+def logout():
+	session.clear(); return redirect(url_for("login"))
+
+
+criar_banco()
+
+if __name__ == "__main__":
+	app.run(host="0.0.0.0", port=5000, debug=False)
 
