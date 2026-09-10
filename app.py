@@ -199,6 +199,22 @@ def ler_demanda_form():
 	return tuple(request.form.get(c, "").strip() for c in ("numero", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes"))
 
 
+def validar_demanda(valores):
+	campos = ("numero do processo", "origem", "assunto", "área", "responsável", "data de recebimento", "prazo da área", "prazo fatal", "situação", "prioridade", "observações")
+	dados = dict(zip(campos, valores))
+	if not dados["origem"] or not dados["assunto"] or not dados["prazo fatal"]:
+		return "Preencha a origem, o assunto e o prazo fatal."
+	if dados["origem"] not in {"TCE-SP", "AUDESP", "Outro"}:
+		return "A origem informada é inválida."
+	for nome in ("data de recebimento", "prazo da área", "prazo fatal"):
+		if dados[nome]:
+			try:
+				datetime.strptime(dados[nome], "%Y-%m-%d")
+			except ValueError:
+				return f"A {nome} deve ser uma data válida."
+	return None
+
+
 @app.route("/sistema")
 def sistema():
 	if (resposta := acesso_login()): return resposta
@@ -217,7 +233,10 @@ def sistema():
 def nova_demanda():
 	if (resposta := acesso_login()): return resposta
 	if request.method == "POST":
-		valores = ler_demanda_form(); conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); demanda_id = cur.lastrowid; conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
+		valores = ler_demanda_form(); erro = validar_demanda(valores)
+		if erro:
+			return pagina("Nova demanda", f'<div class="card"><div class="erro">{erro}</div></div>' + formulario())
+		conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); demanda_id = cur.lastrowid; conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
 	return pagina("Nova demanda", formulario())
 
 
@@ -244,7 +263,10 @@ def editar(id):
 	conn = conectar(); demanda = conn.execute("SELECT * FROM demandas WHERE id = ?", (id,)).fetchone()
 	if not demanda: conn.close(); return "Demanda não encontrada.", 404
 	if request.method == "POST":
-		valores = ler_demanda_form(); conn.execute("UPDATE demandas SET numero_processo=?, origem=?, assunto=?, area=?, responsavel=?, data_recebimento=?, prazo_area=?, prazo_fatal=?, situacao=?, prioridade=?, observacoes=?, atualizado_em=? WHERE id=?", (*valores, agora(), id)); conn.commit(); conn.close(); registrar_historico(id, session["usuario_id"], "EDICAO", "Demanda alterada."); return redirect(url_for("demandas"))
+		valores = ler_demanda_form(); erro = validar_demanda(valores)
+		if erro:
+			conn.close(); return pagina("Editar demanda", f'<div class="card"><div class="erro">{erro}</div></div>' + formulario(demanda))
+		conn.execute("UPDATE demandas SET numero_processo=?, origem=?, assunto=?, area=?, responsavel=?, data_recebimento=?, prazo_area=?, prazo_fatal=?, situacao=?, prioridade=?, observacoes=?, atualizado_em=? WHERE id=?", (*valores, agora(), id)); conn.commit(); conn.close(); registrar_historico(id, session["usuario_id"], "EDICAO", "Demanda alterada."); return redirect(url_for("demandas"))
 	conn.close(); return pagina("Editar demanda", formulario(demanda))
 
 
