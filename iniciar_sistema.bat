@@ -3,7 +3,7 @@ title Sistema de Gestao - SP Aguas
 
 cd /d "%~dp0"
 
-set "EXCEL_DATABASE=C:\Users\ana.silva\OneDrive - PRODESP\Banco de Dados - Sistema.xlsx"
+set "EXCEL_DATABASE=C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Banco de Dados - Sistema.xlsx"
 
 if not exist "%EXCEL_DATABASE%" (
     echo Planilha do OneDrive nao encontrada:
