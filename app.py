@@ -19,7 +19,8 @@ from flask import Flask, redirect, render_template_string, request, send_file, s
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
-PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
+CAMINHO_ONEDRIVE_WINDOWS = r"C:\Users\ana.silva\OneDrive - PRODESP\Banco de Dados - Sistema.xlsx"
+PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", CAMINHO_ONEDRIVE_WINDOWS if os.name == "nt" and os.path.exists(CAMINHO_ONEDRIVE_WINDOWS) else "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
 SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None

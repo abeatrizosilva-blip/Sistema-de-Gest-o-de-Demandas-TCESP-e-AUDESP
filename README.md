@@ -32,6 +32,8 @@ O banco de dados principal e a planilha `sp_aguas.xlsx`, criada automaticamente 
 EXCEL_DATABASE=/caminho/dados.xlsx python app.py
 ```
 
+No Windows, se o arquivo `C:\Users\ana.silva\OneDrive - PRODESP\Banco de Dados - Sistema.xlsx` existir, o aplicativo tambem o detecta automaticamente mesmo quando iniciado diretamente com `python app.py`.
+
 O sistema carrega os dados em memoria durante cada operacao e salva a planilha a cada `commit`, substituindo o arquivo de forma atomica. Se `sp_aguas.xlsx` ainda nao existir e `sp_aguas.db` estiver presente, os dados do SQLite sao migrados automaticamente na primeira inicializacao. Depois disso, o arquivo Excel passa a ser a fonte principal.
 
 ### OneDrive / Excel Online
