@@ -34,6 +34,23 @@ EXCEL_DATABASE=/caminho/dados.xlsx python app.py
 
 O sistema carrega os dados em memoria durante cada operacao e salva a planilha a cada `commit`, substituindo o arquivo de forma atomica. Se `sp_aguas.xlsx` ainda nao existir e `sp_aguas.db` estiver presente, os dados do SQLite sao migrados automaticamente na primeira inicializacao. Depois disso, o arquivo Excel passa a ser a fonte principal.
 
+### OneDrive / Excel Online
+
+Para manter a planilha persistente fora do servidor, o sistema pode sincronizar o arquivo com o OneDrive usando a Microsoft Graph API. Essa configuracao requer uma aplicacao registrada no Microsoft Entra ID com permissao de aplicacao `Files.ReadWrite.All` e consentimento administrativo. Ela e indicada para OneDrive corporativo ou SharePoint; OneDrive pessoal requer um fluxo OAuth delegado.
+
+Defina as variaveis abaixo no ambiente de execucao, sem coloca-las no Git:
+
+```bash
+ONEDRIVE_ENABLED=true
+ONEDRIVE_TENANT_ID=seu-tenant-id
+ONEDRIVE_CLIENT_ID=seu-client-id
+ONEDRIVE_CLIENT_SECRET=seu-client-secret
+ONEDRIVE_USER=usuario@empresa.gov.br
+ONEDRIVE_PATH=SP_AGUAS/sp_aguas.xlsx
+```
+
+Ao iniciar, o sistema baixa `ONEDRIVE_PATH`; a cada cadastro, edicao ou exclusao, envia a planilha atualizada de volta ao OneDrive. Se a planilha remota ainda nao existir, o primeiro salvamento cria o arquivo.
+
 ### Vercel
 
 O arquivo `vercel.json` configura o Flask como uma funcao Python. Na Vercel, a planilha usa `/tmp` e pode ser apagada entre execucoes. Portanto, essa configuracao e adequada para testes locais ou ambientes com armazenamento persistente; para producao com varios usuarios, recomenda-se um banco externo ou um servico de planilhas com controle de concorrencia.

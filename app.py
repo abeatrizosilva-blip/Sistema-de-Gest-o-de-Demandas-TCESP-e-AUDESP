@@ -1,11 +1,15 @@
 from datetime import date, datetime
 import io
 import html
+import json
 import os
 import socket
 import sqlite3
 import tempfile
 from threading import RLock
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 import bcrypt
 from openpyxl import Workbook, load_workbook
@@ -19,12 +23,88 @@ PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", "/tmp/sp_
 SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None
+ONEDRIVE_ENABLED = os.environ.get("ONEDRIVE_ENABLED", "").lower() in {"1", "true", "sim", "yes"}
+ONEDRIVE_TENANT_ID = os.environ.get("ONEDRIVE_TENANT_ID", "")
+ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "")
+ONEDRIVE_CLIENT_SECRET = os.environ.get("ONEDRIVE_CLIENT_SECRET", "")
+ONEDRIVE_USER = os.environ.get("ONEDRIVE_USER", "")
+ONEDRIVE_PATH = os.environ.get("ONEDRIVE_PATH", "SP_AGUAS/sp_aguas.xlsx")
 
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
 	"demandas": ("id", "numero_processo", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "criado_por", "criado_em", "atualizado_em"),
 	"historico": ("id", "demanda_id", "usuario_id", "acao", "descricao", "data_hora"),
 }
+
+
+def _onedrive_configurado():
+	return ONEDRIVE_ENABLED
+
+
+def _onedrive_token():
+	credenciais = (ONEDRIVE_TENANT_ID, ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_USER)
+	if not all(credenciais):
+		raise RuntimeError("OneDrive ativado, mas faltam ONEDRIVE_TENANT_ID, ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET ou ONEDRIVE_USER.")
+	dados = urlencode({
+		"client_id": ONEDRIVE_CLIENT_ID,
+		"client_secret": ONEDRIVE_CLIENT_SECRET,
+		"scope": "https://graph.microsoft.com/.default",
+		"grant_type": "client_credentials",
+	}).encode()
+	url = f"https://login.microsoftonline.com/{quote(ONEDRIVE_TENANT_ID, safe='')}/oauth2/v2.0/token"
+	try:
+		with urlopen(Request(url, data=dados, headers={"Content-Type": "application/x-www-form-urlencoded"}), timeout=30) as resposta:
+			return json.loads(resposta.read().decode())["access_token"]
+	except (HTTPError, URLError, KeyError, json.JSONDecodeError) as erro:
+		raise RuntimeError(f"Nao foi possivel autenticar no OneDrive: {erro}") from erro
+
+
+def _onedrive_url():
+	usuario = quote(ONEDRIVE_USER, safe="")
+	caminho = quote(ONEDRIVE_PATH.strip("/"), safe="/")
+	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}:/content"
+
+
+def _baixar_planilha_one_drive():
+	if not _onedrive_configurado():
+		return False
+	try:
+		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=60) as resposta:
+			conteudo = resposta.read()
+	except HTTPError as erro:
+		if erro.code == 404:
+			return False
+		raise RuntimeError(f"Nao foi possivel baixar a planilha do OneDrive (HTTP {erro.code}).") from erro
+	except URLError as erro:
+		raise RuntimeError(f"Nao foi possivel acessar o OneDrive: {erro}") from erro
+	os.makedirs(os.path.dirname(os.path.abspath(PLANILHA)), exist_ok=True)
+	diretorio = os.path.dirname(os.path.abspath(PLANILHA))
+	with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=diretorio, delete=False) as temporario:
+		caminho_temporario = temporario.name
+	try:
+		with open(caminho_temporario, "wb") as arquivo:
+			arquivo.write(conteudo)
+		os.replace(caminho_temporario, PLANILHA)
+	finally:
+		if os.path.exists(caminho_temporario):
+			os.unlink(caminho_temporario)
+	return True
+
+
+def _enviar_planilha_one_drive():
+	if not _onedrive_configurado():
+		return
+	try:
+		with open(PLANILHA, "rb") as arquivo:
+			conteudo = arquivo.read()
+		request = Request(_onedrive_url(), data=conteudo, method="PUT", headers={
+			"Authorization": f"Bearer {_onedrive_token()}",
+			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		})
+		with urlopen(request, timeout=60):
+			return
+	except (HTTPError, URLError, OSError) as erro:
+		raise RuntimeError(f"Nao foi possivel salvar a planilha no OneDrive: {erro}") from erro
 
 
 def _criar_esquema(conn):
@@ -113,12 +193,14 @@ def _salvar_planilha(conn):
 	finally:
 		if os.path.exists(caminho_temporario):
 			os.unlink(caminho_temporario)
+	_enviar_planilha_one_drive()
 
 
 class ConexaoExcel:
 	def __init__(self):
 		self._conn = sqlite3.connect(":memory:", check_same_thread=False)
 		self._conn.row_factory = sqlite3.Row
+		_baixar_planilha_one_drive()
 		_criar_esquema(self._conn)
 		if not _carregar_planilha(self._conn):
 			_carregar_sqlite_legado(self._conn)
