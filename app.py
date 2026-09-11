@@ -1,6 +1,7 @@
 from datetime import date, datetime
 import io
 import html
+import hashlib
 import json
 import os
 import socket
@@ -144,6 +145,39 @@ def salvar_planilha():
 
 def _enviar_planilha_one_drive():
 	return salvar_planilha()
+
+
+def _graph_metadata_diagnostico():
+	"""Obtém os metadados do arquivo remoto no SharePoint."""
+	token = _onedrive_token()
+	url = _onedrive_url().replace("/content", "")
+	requisicao = Request(url, headers={"Authorization": f"Bearer {token}"})
+	with urlopen(requisicao, timeout=30) as resposta:
+		return json.loads(resposta.read().decode("utf-8"))
+
+
+def _graph_download_diagnostico():
+	"""Baixa o arquivo remoto como bytes."""
+	token = _onedrive_token()
+	requisicao = Request(_onedrive_url(), headers={"Authorization": f"Bearer {token}"})
+	with urlopen(requisicao, timeout=60) as resposta:
+		return resposta.read()
+
+
+def _graph_upload_diagnostico(conteudo):
+	"""Envia o XLSX gerado pela aplicação ao arquivo remoto."""
+	token = _onedrive_token()
+	requisicao = Request(
+		_onedrive_url(),
+		data=conteudo,
+		method="PUT",
+		headers={
+			"Authorization": f"Bearer {token}",
+			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		},
+	)
+	with urlopen(requisicao, timeout=60) as resposta:
+		return resposta.status
 
 
 def _criar_esquema(conn):
@@ -689,9 +723,208 @@ def status():
 		return jsonify(resultado), 500
 
 
+@app.route("/teste-integracao")
+def teste_integracao():
+	if not usuario_logado():
+		return jsonify({"status": "ERRO", "mensagem": "Usuário não autenticado."}), 401
+	if not administrador():
+		return jsonify({"status": "ERRO", "mensagem": "Somente administradores podem executar o teste."}), 403
+
+	resultado = {"teste": "Integração SP ÁGUAS + Microsoft Graph + SharePoint", "status_final": "INICIANDO", "arquivo": SHAREPOINT_FILE_PATH, "etapas": []}
+
+	def etapa(nome, status, mensagem, **dados):
+		item = {"etapa": nome, "status": status, "mensagem": mensagem}
+		item.update(dados)
+		resultado["etapas"].append(item)
+
+	if not _onedrive_configurado():
+		etapa("1. Configuração", "ERRO", "Integração SharePoint desabilitada ou incompleta.")
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+	etapa("1. Configuração", "OK", "Configuração SharePoint habilitada.", arquivo=SHAREPOINT_FILE_PATH)
+
+	try:
+		token = _onedrive_token()
+		etapa("2. Autenticação Microsoft Graph", "OK", "Token obtido com sucesso.")
+	except Exception as erro:
+		etapa("2. Autenticação Microsoft Graph", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
+			arquivo_original = resposta.read()
+			status_http = resposta.status
+		if status_http != 200 or not arquivo_original:
+			raise RuntimeError(f"Microsoft Graph retornou HTTP {status_http} ou arquivo vazio.")
+		hash_original = hashlib.sha256(arquivo_original).hexdigest()
+		etapa("3. Download do Excel", "OK", "Arquivo baixado com sucesso.", tamanho_bytes=len(arquivo_original), sha256=hash_original)
+	except Exception as erro:
+		etapa("3. Download do Excel", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		workbook = load_workbook(io.BytesIO(arquivo_original), read_only=True, data_only=True)
+		abas = workbook.sheetnames
+		faltantes = {"usuarios", "demandas", "historico"} - set(abas)
+		workbook.close()
+		if faltantes:
+			raise RuntimeError("Faltam as abas: " + ", ".join(sorted(faltantes)))
+		etapa("4. Validação do Excel", "OK", "Arquivo XLSX válido e estrutura esperada encontrada.", abas=abas)
+	except Exception as erro:
+		etapa("4. Validação do Excel", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		conn = conectar()
+		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in ("usuarios", "demandas", "historico")}
+		conn.close()
+		etapa("5. Leitura dos dados", "OK", "Dados carregados no sistema.", **contagens)
+	except Exception as erro:
+		etapa("5. Leitura dos dados", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		requisicao = Request(_onedrive_url(), data=arquivo_original, method="PUT", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
+		with urlopen(requisicao, timeout=120) as resposta:
+			if resposta.status not in (200, 201):
+				raise RuntimeError(f"Microsoft Graph retornou HTTP {resposta.status}.")
+		etapa("6. Gravação no SharePoint", "OK", "O Graph aceitou os mesmos bytes do arquivo.")
+	except Exception as erro:
+		etapa("6. Gravação no SharePoint", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
+			arquivo_depois = resposta.read()
+		hash_depois = hashlib.sha256(arquivo_depois).hexdigest()
+		if hash_original != hash_depois:
+			raise RuntimeError("O arquivo recuperado é diferente do arquivo enviado.")
+		etapa("7. Validação da persistência", "OK", "O arquivo recuperado é idêntico ao enviado.", sha256=hash_depois)
+	except Exception as erro:
+		etapa("7. Validação da persistência", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA"
+		return jsonify(resultado), 500
+
+	resultado["status_final"] = "OK"
+	resultado["diagnostico"] = "A integração SharePoint está funcionando e a persistência foi confirmada por SHA-256."
+	return jsonify(resultado), 200
+
+
 @app.route("/health")
 def health():
 	return jsonify({"status": "ok", "service": "sp-aguas"}), 200
+
+
+@app.route("/diagnostico-sync")
+def diagnostico_sync():
+	"""Diagnostica a cadeia banco em memória -> XLSX -> SharePoint."""
+	if (resposta := acesso_login()):
+		return resposta
+	if not administrador():
+		return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
+
+	inicio = datetime.now()
+	resultado = {"status": "INICIANDO", "arquivo_configurado": SHAREPOINT_FILE_PATH, "etapas": []}
+
+	def etapa(numero, nome, status, mensagem, **dados):
+		resultado["etapas"].append({"numero": numero, "etapa": nome, "status": status, "mensagem": mensagem, **dados})
+
+	def falha(numero, nome, erro):
+		etapa(numero, nome, "ERRO", str(erro))
+		resultado["status"] = "FALHA"
+		return jsonify(resultado), 500
+
+	try:
+		if not _onedrive_configurado():
+			raise RuntimeError("Integração SharePoint desabilitada ou incompleta.")
+		etapa(1, "Configuração", "OK", "Configuração do Microsoft Graph está preenchida.", caminho=SHAREPOINT_FILE_PATH)
+	except Exception as erro:
+		return falha(1, "Configuração", erro)
+
+	try:
+		token = _onedrive_token()
+		etapa(2, "Autenticação Microsoft Graph", "OK", "Access token obtido com sucesso.")
+	except Exception as erro:
+		return falha(2, "Autenticação Microsoft Graph", erro)
+
+	try:
+		meta_antes = _graph_metadata_diagnostico()
+		etapa(3, "Arquivo remoto", "OK", "Microsoft Graph encontrou o arquivo.", nome=meta_antes.get("name"), id=meta_antes.get("id"), tamanho_bytes=meta_antes.get("size"), etag=meta_antes.get("eTag"))
+	except Exception as erro:
+		return falha(3, "Arquivo remoto", erro)
+
+	try:
+		remoto_antes = _graph_download_diagnostico()
+		hash_antes = hashlib.sha256(remoto_antes).hexdigest()
+		etapa(4, "Download do Excel remoto", "OK", "Arquivo remoto baixado.", tamanho_bytes=len(remoto_antes), sha256=hash_antes)
+	except Exception as erro:
+		return falha(4, "Download do Excel remoto", erro)
+
+	try:
+		workbook = load_workbook(io.BytesIO(remoto_antes), read_only=True, data_only=True)
+		abas = list(workbook.sheetnames)
+		faltantes = set(TABELAS_EXCEL) - set(abas)
+		contagens_remotas = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
+		workbook.close()
+		if faltantes:
+			raise RuntimeError("Faltam as abas: " + ", ".join(sorted(faltantes)))
+		etapa(5, "Estrutura do Excel remoto", "OK", "XLSX válido.", abas=abas, contagens=contagens_remotas)
+	except Exception as erro:
+		return falha(5, "Estrutura do Excel remoto", erro)
+
+	try:
+		conn = conectar()
+		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+		etapa(6, "Dados da aplicação", "OK", "Contagens obtidas do banco em memória.", contagens=contagens, contagens_remotas=contagens_remotas)
+	except Exception as erro:
+		return falha(6, "Dados da aplicação", erro)
+
+	try:
+		workbook = Workbook()
+		workbook.remove(workbook.active)
+		for tabela, colunas in TABELAS_EXCEL.items():
+			planilha = workbook.create_sheet(tabela)
+			planilha.append(list(colunas))
+			for registro in conn.execute(f"SELECT {', '.join(colunas)} FROM {tabela} ORDER BY id"):
+				planilha.append([registro[coluna] for coluna in colunas])
+		memoria = io.BytesIO()
+		workbook.save(memoria)
+		arquivo_gerado = memoria.getvalue()
+		hash_gerado = hashlib.sha256(arquivo_gerado).hexdigest()
+		etapa(7, "Geração do XLSX", "OK", "XLSX reconstruído pela aplicação.", tamanho_bytes=len(arquivo_gerado), sha256=hash_gerado)
+	except Exception as erro:
+		return falha(7, "Geração do XLSX", erro)
+
+	try:
+		status_put = _graph_upload_diagnostico(arquivo_gerado)
+		if status_put not in (200, 201):
+			raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
+		etapa(8, "Gravação no SharePoint", "OK", "XLSX gerado enviado ao arquivo remoto.", http_status=status_put)
+	except Exception as erro:
+		return falha(8, "Gravação no SharePoint", erro)
+
+	try:
+		remoto_depois = _graph_download_diagnostico()
+		hash_depois = hashlib.sha256(remoto_depois).hexdigest()
+		if hash_depois != hash_gerado:
+			raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado.")
+		etapa(9, "Confirmação da persistência", "OK", "SHA-256 do arquivo remoto coincide com o arquivo enviado.", sha256=hash_depois)
+	except Exception as erro:
+		return falha(9, "Confirmação da persistência", erro)
+
+	try:
+		meta_depois = _graph_metadata_diagnostico()
+		etapa(10, "Metadados finais", "OK", "Metadados consultados após a gravação.", tamanho_bytes=meta_depois.get("size"), etag=meta_depois.get("eTag"))
+	except Exception as erro:
+		etapa(10, "Metadados finais", "AVISO", str(erro))
+
+	resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="A persistência do XLSX no SharePoint foi confirmada.")
+	return jsonify(resultado), 200
 
 
 @app.route("/logout")
