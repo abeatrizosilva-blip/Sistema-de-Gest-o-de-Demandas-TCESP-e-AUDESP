@@ -26,12 +26,14 @@ python app.py
 
 Tambem e possivel executar `iniciar_sistema.bat` depois de criar o ambiente virtual e instalar as dependencias.
 
-O banco SQLite e criado automaticamente como `sp_aguas.db`. Para usar outro arquivo local, defina a variavel de ambiente `DATABASE` antes de iniciar.
+O banco de dados principal e a planilha `sp_aguas.xlsx`, criada automaticamente na primeira execucao. Ela possui as abas `usuarios`, `demandas` e `historico`. Para usar outro caminho, defina `EXCEL_DATABASE` antes de iniciar:
+
+```bash
+EXCEL_DATABASE=/caminho/dados.xlsx python app.py
+```
+
+O sistema carrega os dados em memoria durante cada operacao e salva a planilha a cada `commit`, substituindo o arquivo de forma atomica. Se `sp_aguas.xlsx` ainda nao existir e `sp_aguas.db` estiver presente, os dados do SQLite sao migrados automaticamente na primeira inicializacao. Depois disso, o arquivo Excel passa a ser a fonte principal.
 
 ### Vercel
 
-O arquivo `vercel.json` configura o Flask como uma funcao Python. Com `DATABASE_URL` configurada, a Vercel usa o Neon PostgreSQL e os dados ficam persistentes. Sem essa variavel, o aplicativo usa SQLite em `/tmp` apenas para testes; esse armazenamento e temporario e pode ser apagado entre execucoes.
-
-### Neon PostgreSQL
-
-O aplicativo usa Neon quando a variavel `DATABASE_URL` estiver configurada. Na Vercel, adicione essa variavel com a connection string do Neon e publique novamente. Nunca coloque essa string diretamente no codigo ou no Git.
+O arquivo `vercel.json` configura o Flask como uma funcao Python. Na Vercel, a planilha usa `/tmp` e pode ser apagada entre execucoes. Portanto, essa configuracao e adequada para testes locais ou ambientes com armazenamento persistente; para producao com varios usuarios, recomenda-se um banco externo ou um servico de planilhas com controle de concorrencia.

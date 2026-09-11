@@ -3,48 +3,141 @@ import io
 import os
 import socket
 import sqlite3
+import tempfile
+from threading import RLock
 
 import bcrypt
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 from flask import Flask, redirect, render_template_string, request, send_file, session, url_for
-
-try:
-	import psycopg
-	from psycopg.rows import dict_row
-except ImportError:
-	psycopg = None
 
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
-DATABASE_URL = os.environ.get("DATABASE_URL")
-BANCO = os.environ.get("DATABASE", "/tmp/sp_aguas.db" if os.environ.get("VERCEL") else "sp_aguas.db")
+PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
+SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
+ARQUIVO_LOCK = RLock()
+
+TABELAS_EXCEL = {
+	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
+	"demandas": ("id", "numero_processo", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "criado_por", "criado_em", "atualizado_em"),
+	"historico": ("id", "demanda_id", "usuario_id", "acao", "descricao", "data_hora"),
+}
 
 
-class Conexao:
-	def __init__(self, conexao, postgres=False):
-		self._conexao = conexao
-		self.postgres = postgres
+def _criar_esquema(conn):
+	conn.executescript("""
+		CREATE TABLE IF NOT EXISTS usuarios (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
+			usuario TEXT NOT NULL UNIQUE, email TEXT UNIQUE, senha_hash TEXT NOT NULL,
+			perfil TEXT NOT NULL DEFAULT 'Usuario', ativo INTEGER NOT NULL DEFAULT 1,
+			aprovado INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS demandas (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, origem TEXT NOT NULL,
+			assunto TEXT NOT NULL, area TEXT, responsavel TEXT, data_recebimento TEXT,
+			prazo_area TEXT, prazo_fatal TEXT, situacao TEXT, prioridade TEXT, observacoes TEXT,
+			criado_por INTEGER, criado_em TEXT NOT NULL, atualizado_em TEXT
+		);
+		CREATE TABLE IF NOT EXISTS historico (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, demanda_id INTEGER, usuario_id INTEGER,
+			acao TEXT, descricao TEXT, data_hora TEXT NOT NULL
+		);
+	""")
+
+
+def _carregar_planilha(conn):
+	if not os.path.exists(PLANILHA):
+		return False
+	workbook = load_workbook(PLANILHA, read_only=True, data_only=True)
+	try:
+		for tabela, colunas in TABELAS_EXCEL.items():
+			if tabela not in workbook.sheetnames:
+				continue
+			planilha = workbook[tabela]
+			cabecalho = [celula.value for celula in next(planilha.iter_rows(min_row=1, max_row=1))]
+			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
+			if len(indices) != len(colunas):
+				continue
+			for linha in planilha.iter_rows(min_row=2, values_only=True):
+				if not any(valor is not None for valor in linha):
+					continue
+				valores = tuple(linha[indices[coluna]] for coluna in colunas)
+				conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", valores)
+	finally:
+		workbook.close()
+	return True
+
+
+def _carregar_sqlite_legado(conn):
+	if not os.path.exists(SQLITE_LEGADO) or os.path.abspath(SQLITE_LEGADO) == os.path.abspath(PLANILHA):
+		return
+	legado = sqlite3.connect(SQLITE_LEGADO)
+	legado.row_factory = sqlite3.Row
+	try:
+		for tabela, colunas in TABELAS_EXCEL.items():
+			try:
+				registros = legado.execute(f"SELECT {', '.join(colunas)} FROM {tabela}").fetchall()
+			except sqlite3.OperationalError:
+				continue
+			for registro in registros:
+				conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", tuple(registro))
+	finally:
+		legado.close()
+
+
+def _salvar_planilha(conn):
+	workbook = Workbook()
+	workbook.remove(workbook.active)
+	for tabela, colunas in TABELAS_EXCEL.items():
+		planilha = workbook.create_sheet(tabela)
+		planilha.append(list(colunas))
+		for celula in planilha[1]:
+			celula.font = Font(bold=True)
+		for registro in conn.execute(f"SELECT {', '.join(colunas)} FROM {tabela} ORDER BY id"):
+			planilha.append([registro[coluna] for coluna in colunas])
+		planilha.freeze_panes = "A2"
+		planilha.auto_filter.ref = planilha.dimensions
+		for coluna in planilha.columns:
+			largura = min(max(len(str(celula.value or "")) for celula in coluna) + 2, 45)
+			planilha.column_dimensions[coluna[0].column_letter].width = largura
+	os.makedirs(os.path.dirname(os.path.abspath(PLANILHA)), exist_ok=True)
+	diretorio = os.path.dirname(os.path.abspath(PLANILHA))
+	with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=diretorio, delete=False) as temporario:
+		caminho_temporario = temporario.name
+	try:
+		workbook.save(caminho_temporario)
+		os.replace(caminho_temporario, PLANILHA)
+	finally:
+		if os.path.exists(caminho_temporario):
+			os.unlink(caminho_temporario)
+
+
+class ConexaoExcel:
+	def __init__(self):
+		self._conn = sqlite3.connect(":memory:")
+		self._conn.row_factory = sqlite3.Row
+		_criar_esquema(self._conn)
+		if not _carregar_planilha(self._conn):
+			_carregar_sqlite_legado(self._conn)
 
 	def execute(self, consulta, parametros=()):
-		if self.postgres:
-			consulta = consulta.replace("?", "%s")
-		return self._conexao.execute(consulta, parametros)
+		return self._conn.execute(consulta, parametros)
+
+	def executescript(self, consulta):
+		return self._conn.executescript(consulta)
 
 	def commit(self):
-		self._conexao.commit()
+		with ARQUIVO_LOCK:
+			self._conn.commit()
+			_salvar_planilha(self._conn)
 
 	def close(self):
-		self._conexao.close()
+		self._conn.close()
 
 
 def conectar():
-	if DATABASE_URL:
-		if psycopg is None:
-			raise RuntimeError("A dependência psycopg[binary] não está instalada.")
-		return Conexao(psycopg.connect(DATABASE_URL, row_factory=dict_row), postgres=True)
-	conn = sqlite3.connect(BANCO)
-	conn.row_factory = sqlite3.Row
-	return Conexao(conn)
+	return ConexaoExcel()
 
 
 def agora():
@@ -53,29 +146,7 @@ def agora():
 
 def criar_banco():
 	conn = conectar()
-	if conn.postgres:
-		conn.execute("""
-			CREATE TABLE IF NOT EXISTS usuarios (
-				id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, nome TEXT NOT NULL,
-				usuario TEXT NOT NULL UNIQUE, email TEXT UNIQUE, senha_hash TEXT NOT NULL,
-				perfil TEXT NOT NULL DEFAULT 'Usuario', ativo INTEGER NOT NULL DEFAULT 1,
-				aprovado INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL
-			);
-			CREATE TABLE IF NOT EXISTS demandas (
-				id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, numero_processo TEXT, origem TEXT NOT NULL,
-				assunto TEXT NOT NULL, area TEXT, responsavel TEXT, data_recebimento TEXT,
-				prazo_area TEXT, prazo_fatal TEXT, situacao TEXT, prioridade TEXT, observacoes TEXT,
-				criado_por BIGINT, criado_em TEXT NOT NULL, atualizado_em TEXT
-			);
-			CREATE TABLE IF NOT EXISTS historico (
-				id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, demanda_id BIGINT, usuario_id BIGINT,
-				acao TEXT, descricao TEXT, data_hora TEXT NOT NULL
-			);
-		""")
-		conn.commit()
-		conn.close()
-		return
-	conn._conexao.executescript("""
+	conn.executescript("""
 		CREATE TABLE IF NOT EXISTS usuarios (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
 			usuario TEXT NOT NULL UNIQUE, email TEXT UNIQUE, senha_hash TEXT NOT NULL,
@@ -240,7 +311,7 @@ def cadastro():
 			try:
 				conn = conectar(); conn.execute("INSERT INTO usuarios (nome, usuario, email, senha_hash, criado_em) VALUES (?, ?, ?, ?, ?)", (nome, usuario, email, bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), agora())); conn.commit(); conn.close()
 				return pagina("Cadastro realizado", '<div class="card"><h1>Cadastro realizado</h1><p>Aguarde a aprovação do administrador.</p><a class="btn" href="/">Voltar ao login</a></div>')
-			except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation if psycopg else sqlite3.IntegrityError): erro = "Usuário ou e-mail já cadastrado."
+			except sqlite3.IntegrityError: erro = "Usuário ou e-mail já cadastrado."
 		return pagina("Cadastro", f'<div class="card"><div class="erro">{erro}</div><a href="/cadastro" class="btn">Voltar</a></div>')
 	return pagina("Cadastro", '<div class="card" style="max-width:550px;margin:auto"><h2>Criar acesso ao sistema</h2><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>E-mail</label><input type="email" name="email" required><label>Senha</label><input type="password" name="senha" minlength="8" required><label>Confirmar senha</label><input type="password" name="confirmar" minlength="8" required><button>Criar minha conta</button></form></div>')
 
@@ -286,14 +357,7 @@ def nova_demanda():
 		valores = ler_demanda_form(); erro = validar_demanda(valores)
 		if erro:
 			return pagina("Nova demanda", f'<div class="card"><div class="erro">{erro}</div></div>' + formulario())
-		conn = conectar()
-		if conn.postgres:
-			cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id", (*valores, session["usuario_id"], agora(), agora()))
-			demanda_id = cur.fetchone()["id"]
-		else:
-			cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora()))
-			demanda_id = cur.lastrowid
-		conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
+		conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); demanda_id = cur.lastrowid; conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
 	return pagina("Nova demanda", formulario())
 
 
