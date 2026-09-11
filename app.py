@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 import bcrypt
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
-from flask import Flask, redirect, render_template_string, request, send_file, session, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
 
 app = Flask(__name__)
@@ -24,12 +24,22 @@ PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", CAMINHO_O
 SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None
-ONEDRIVE_ENABLED = os.environ.get("ONEDRIVE_ENABLED", "").lower() in {"1", "true", "sim", "yes"}
-ONEDRIVE_TENANT_ID = os.environ.get("ONEDRIVE_TENANT_ID", "")
-ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "")
-ONEDRIVE_CLIENT_SECRET = os.environ.get("ONEDRIVE_CLIENT_SECRET", "")
-ONEDRIVE_USER = os.environ.get("ONEDRIVE_USER", "")
-ONEDRIVE_PATH = os.environ.get("ONEDRIVE_PATH", "SP_AGUAS/sp_aguas.xlsx")
+ONEDRIVE_ENABLED = os.environ.get("SHAREPOINT_ENABLED", os.environ.get("ONEDRIVE_ENABLED", "")).lower() in {"1", "true", "sim", "yes"}
+ONEDRIVE_TENANT_ID = os.environ.get("SHAREPOINT_TENANT_ID", os.environ.get("ONEDRIVE_TENANT_ID", ""))
+ONEDRIVE_CLIENT_ID = os.environ.get("SHAREPOINT_CLIENT_ID", os.environ.get("ONEDRIVE_CLIENT_ID", ""))
+ONEDRIVE_CLIENT_SECRET = os.environ.get("SHAREPOINT_CLIENT_SECRET", os.environ.get("ONEDRIVE_CLIENT_SECRET", ""))
+ONEDRIVE_USER = os.environ.get("SHAREPOINT_USER", os.environ.get("ONEDRIVE_USER", ""))
+SHAREPOINT_FILE_PATH = os.environ.get(
+	"SHAREPOINT_FILE_PATH",
+	"SP_AGUAS/Sistema de Gestão de Demandas - SP Aguas.xlsx"
+)
+ONEDRIVE_PATH = os.environ.get("ONEDRIVE_PATH", SHAREPOINT_FILE_PATH)
+SHAREPOINT_ENABLED = ONEDRIVE_ENABLED
+SHAREPOINT_TENANT_ID = ONEDRIVE_TENANT_ID
+SHAREPOINT_CLIENT_ID = ONEDRIVE_CLIENT_ID
+SHAREPOINT_CLIENT_SECRET = ONEDRIVE_CLIENT_SECRET
+SHAREPOINT_SITE_ID = os.environ.get("SHAREPOINT_SITE_ID", "")
+SHAREPOINT_DRIVE_ID = os.environ.get("SHAREPOINT_DRIVE_ID", "")
 
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
@@ -39,52 +49,64 @@ TABELAS_EXCEL = {
 
 
 def _onedrive_configurado():
-	return ONEDRIVE_ENABLED
+	return SHAREPOINT_ENABLED and all((SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_SITE_ID, SHAREPOINT_DRIVE_ID, SHAREPOINT_FILE_PATH))
 
 
 def _onedrive_token():
-	credenciais = (ONEDRIVE_TENANT_ID, ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_USER)
-	if not all(credenciais):
-		raise RuntimeError("OneDrive ativado, mas faltam ONEDRIVE_TENANT_ID, ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET ou ONEDRIVE_USER.")
+	if not _onedrive_configurado():
+		raise RuntimeError("SharePoint não configurado. Defina SHAREPOINT_ENABLED, SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_SITE_ID, SHAREPOINT_DRIVE_ID e SHAREPOINT_FILE_PATH.")
 	dados = urlencode({
-		"client_id": ONEDRIVE_CLIENT_ID,
-		"client_secret": ONEDRIVE_CLIENT_SECRET,
+		"client_id": SHAREPOINT_CLIENT_ID,
+		"client_secret": SHAREPOINT_CLIENT_SECRET,
 		"scope": "https://graph.microsoft.com/.default",
 		"grant_type": "client_credentials",
 	}).encode()
-	url = f"https://login.microsoftonline.com/{quote(ONEDRIVE_TENANT_ID, safe='')}/oauth2/v2.0/token"
+	url = f"https://login.microsoftonline.com/{quote(SHAREPOINT_TENANT_ID, safe='')}/oauth2/v2.0/token"
 	try:
 		with urlopen(Request(url, data=dados, headers={"Content-Type": "application/x-www-form-urlencoded"}), timeout=30) as resposta:
-			return json.loads(resposta.read().decode())["access_token"]
-	except (HTTPError, URLError, KeyError, json.JSONDecodeError) as erro:
-		raise RuntimeError(f"Nao foi possivel autenticar no OneDrive: {erro}") from erro
+			payload = json.loads(resposta.read().decode())
+			if not payload.get("access_token"):
+				raise RuntimeError("Microsoft Graph nao retornou access_token.")
+			return payload["access_token"]
+	except HTTPError as erro:
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
+		raise RuntimeError(f"Falha na autenticacao Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
+	except (URLError, KeyError, json.JSONDecodeError) as erro:
+		raise RuntimeError(f"Nao foi possivel autenticar no Microsoft Graph: {erro}") from erro
 
 
 def _onedrive_url():
-	usuario = quote(ONEDRIVE_USER, safe="")
-	caminho = quote(ONEDRIVE_PATH.strip("/"), safe="/")
-	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}:/content"
+	caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
+	return f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
 
 
-def _baixar_planilha_one_drive():
+def obter_planilha():
+	"""Baixa a planilha remota para um arquivo temporario e retorna seu caminho."""
 	if not _onedrive_configurado():
-		return False
+		return None
 	try:
 		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=60) as resposta:
 			conteudo = resposta.read()
 	except HTTPError as erro:
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1500]
 		if erro.code == 404:
-			return False
-		raise RuntimeError(f"Nao foi possivel baixar a planilha do OneDrive (HTTP {erro.code}).") from erro
+			raise RuntimeError(f"Arquivo nao encontrado no SharePoint. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'. Resposta Graph: {detalhe}") from erro
+		if erro.code in (401, 403):
+			raise RuntimeError("Microsoft Graph recusou o acesso. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
+		raise RuntimeError(f"Nao foi possivel baixar a planilha do SharePoint (HTTP {erro.code}): {detalhe}") from erro
 	except URLError as erro:
-		raise RuntimeError(f"Nao foi possivel acessar o OneDrive: {erro}") from erro
+		raise RuntimeError(f"Nao foi possivel acessar o SharePoint: {erro}") from erro
+	with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as temporario:
+		temporario.write(conteudo)
+		return temporario.name
+
+
+def _baixar_planilha_one_drive():
+	caminho_temporario = obter_planilha()
+	if not caminho_temporario:
+		return False
 	os.makedirs(os.path.dirname(os.path.abspath(PLANILHA)), exist_ok=True)
-	diretorio = os.path.dirname(os.path.abspath(PLANILHA))
-	with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=diretorio, delete=False) as temporario:
-		caminho_temporario = temporario.name
 	try:
-		with open(caminho_temporario, "wb") as arquivo:
-			arquivo.write(conteudo)
 		os.replace(caminho_temporario, PLANILHA)
 	finally:
 		if os.path.exists(caminho_temporario):
@@ -92,20 +114,36 @@ def _baixar_planilha_one_drive():
 	return True
 
 
-def _enviar_planilha_one_drive():
+def salvar_planilha():
+	"""Envia a planilha modificada de volta para o SharePoint."""
 	if not _onedrive_configurado():
-		return
+		return False
 	try:
 		with open(PLANILHA, "rb") as arquivo:
 			conteudo = arquivo.read()
+		if not conteudo:
+			raise RuntimeError("Recusando enviar uma planilha vazia ao SharePoint.")
 		request = Request(_onedrive_url(), data=conteudo, method="PUT", headers={
 			"Authorization": f"Bearer {_onedrive_token()}",
 			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		})
-		with urlopen(request, timeout=60):
-			return
-	except (HTTPError, URLError, OSError) as erro:
-		raise RuntimeError(f"Nao foi possivel salvar a planilha no OneDrive: {erro}") from erro
+		with urlopen(request, timeout=120) as resposta:
+			if resposta.status not in (200, 201):
+				raise RuntimeError(f"Microsoft Graph retornou HTTP {resposta.status}.")
+		return True
+	except HTTPError as erro:
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1500]
+		if erro.code in (401, 403):
+			raise RuntimeError("Microsoft Graph recusou a gravacao. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
+		if erro.code == 404:
+			raise RuntimeError(f"Arquivo nao localizado para gravacao. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'.") from erro
+		raise RuntimeError(f"Nao foi possivel salvar a planilha no SharePoint (HTTP {erro.code}): {detalhe}") from erro
+	except (URLError, OSError) as erro:
+		raise RuntimeError(f"Nao foi possivel salvar a planilha no SharePoint: {erro}") from erro
+
+
+def _enviar_planilha_one_drive():
+	return salvar_planilha()
 
 
 def _criar_esquema(conn):
@@ -637,8 +675,23 @@ def exportar():
 @app.route("/status")
 def status():
 	if (resposta := acesso_login()): return resposta
-	conn = conectar(); conn.execute("SELECT 1").fetchone(); conn.close(); ip = socket.gethostbyname(socket.gethostname())
-	return pagina("Status", f'<div class="card"><h1>Status do sistema</h1><div class="alerta normal">Aplicação: <strong>OPERACIONAL</strong></div><p>Acesso local: http://{ip}:5000</p></div>')
+	resultado = {"status": "OK", "sharepoint_configurado": _onedrive_configurado(), "planilha_local": PLANILHA, "vercel": bool(os.environ.get("VERCEL"))}
+	if not _onedrive_configurado():
+		resultado.update(status="ERRO", erro="Variáveis do SharePoint não estão completas.")
+		return jsonify(resultado), 500
+	try:
+		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=30) as resposta:
+			conteudo = resposta.read()
+		resultado.update(token_graph=True, arquivo_sharepoint_acessivel=True, tamanho_bytes=len(conteudo), mensagem="CONEXÃO COM SHAREPOINT OK")
+		return jsonify(resultado), 200
+	except Exception as erro:
+		resultado.update(status="ERRO", token_graph=False, arquivo_sharepoint_acessivel=False, erro=str(erro))
+		return jsonify(resultado), 500
+
+
+@app.route("/health")
+def health():
+	return jsonify({"status": "ok", "service": "sp-aguas"}), 200
 
 
 @app.route("/logout")
