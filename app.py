@@ -1,5 +1,6 @@
 from datetime import date, datetime
 import io
+import html
 import os
 import socket
 import sqlite3
@@ -221,6 +222,51 @@ def administrador():
 	return session.get("perfil") == "Administrador"
 
 
+def popup_alertas():
+	if not usuario_logado():
+		return ""
+	conn = conectar()
+	registros = conn.execute("SELECT * FROM demandas WHERE situacao != 'Concluído' ORDER BY prazo_fatal").fetchall()
+	conn.close()
+	alertas = []
+	for demanda in registros:
+		prazo = calcular_prazos(demanda["prazo_area"], demanda["prazo_fatal"])
+		if prazo["status"] != "NORMAL" and prazo["dias_fatal"] is not None:
+			alertas.append((demanda, prazo))
+	if not alertas:
+		return ""
+	linhas = "".join(
+		f'<li><strong>{html.escape(prazo["status"])}</strong> — '
+		f'{html.escape(demanda["numero_processo"] or "Sem número")} — '
+		f'{html.escape(demanda["assunto"])} '
+		f'<span>({prazo["dias_fatal"]} dias restantes)</span></li>'
+		for demanda, prazo in alertas[:5]
+	)
+	mais = f'<p class="popup-mais">E mais {len(alertas) - 5} alerta(s).</p>' if len(alertas) > 5 else ""
+	return f'''
+	<div id="popup-alertas" class="popup-alertas" role="alertdialog" aria-modal="true" aria-labelledby="popup-alertas-titulo">
+		<div class="popup-alertas-conteudo">
+			<button type="button" class="popup-fechar" aria-label="Fechar alertas" onclick="fecharPopupAlertas()">&times;</button>
+			<div class="popup-icone">!</div>
+			<h2 id="popup-alertas-titulo">Atenção aos prazos</h2>
+			<p>Existem <strong>{len(alertas)}</strong> demanda(s) que precisam de acompanhamento.</p>
+			<ul>{linhas}</ul>
+			{mais}
+			<a class="btn" href="/alertas">Ver todos os alertas</a>
+		</div>
+	</div>
+	<script>
+		(function () {{
+			const chave = "sp-alertas-" + new Date().toISOString().slice(0, 10);
+			if (!sessionStorage.getItem(chave)) document.getElementById("popup-alertas").classList.add("visivel");
+		}})();
+		function fecharPopupAlertas() {{
+			document.getElementById("popup-alertas").classList.remove("visivel");
+			sessionStorage.setItem("sp-alertas-" + new Date().toISOString().slice(0, 10), "1");
+		}}
+	</script>'''
+
+
 HTML_BASE = """
 <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ titulo or 'SP ÁGUAS' }}</title><style>
@@ -256,10 +302,23 @@ def pagina(titulo, conteudo):
 	td { padding: 13px 10px; }
 	.alerta { border-left: 4px solid transparent; box-shadow: 0 2px 8px rgba(21,55,75,.04); }
 	.vencido { border-left-color: #c62828; } .critico { border-left-color: #e66a00; } .proximo { border-left-color: #c18a05; } .normal { border-left-color: #2e7d32; }
+	.popup-alertas { display: none; position: fixed; inset: 0; z-index: 30; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 30, 45, .48); }
+	.popup-alertas.visivel { display: flex; animation: aparecer .2s ease-out; }
+	.popup-alertas-conteudo { position: relative; width: min(520px, 100%); padding: 30px; border: 1px solid #f0d6a6; border-radius: 16px; background: #fffdf8; box-shadow: 0 18px 50px rgba(7, 30, 45, .25); }
+	.popup-alertas-conteudo h2 { margin: 0 0 8px; color: #7b3f00; }
+	.popup-alertas-conteudo ul { max-height: 230px; margin: 18px 0; padding-left: 20px; color: #4b3b2a; }
+	.popup-alertas-conteudo li { margin: 9px 0; }
+	.popup-alertas-conteudo li strong { color: #b3261e; }
+	.popup-alertas-conteudo li span { color: #786b5c; font-size: 13px; }
+	.popup-fechar { position: absolute; top: 10px; right: 12px; padding: 2px 9px; background: transparent; color: #6d6258; font-size: 27px; line-height: 1; }
+	.popup-fechar:hover { background: transparent; color: #2d2520; box-shadow: none; transform: none; }
+	.popup-icone { display: grid; width: 34px; height: 34px; margin-bottom: 12px; place-items: center; border-radius: 50%; background: #c62828; color: white; font-size: 22px; font-weight: bold; }
+	.popup-mais { margin-top: -8px; color: #786b5c; font-size: 13px; }
+	@keyframes aparecer { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
 	@media (max-width: 760px) { header { position: relative; width: 100%; min-height: auto; padding: 16px; } header > div:not(.logo) { padding: 0; } .logo { padding: 4px 0 14px; } .menu { flex-direction: row; flex-wrap: wrap; margin-top: 14px; } .menu a { padding: 8px 9px; } .container { margin-left: 0; padding: 20px 12px; } }
 	</style>
 	"""
-	return render_template_string(HTML_BASE, titulo=titulo, conteudo=estilo_moderno + conteudo)
+	return render_template_string(HTML_BASE, titulo=titulo, conteudo=estilo_moderno + conteudo + popup_alertas())
 
 
 def acesso_login():
