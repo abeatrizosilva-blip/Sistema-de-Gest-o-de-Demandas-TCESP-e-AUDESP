@@ -164,7 +164,7 @@ def _graph_download_diagnostico():
 		return resposta.read()
 
 
-def _graph_upload_diagnostico(conteudo):
+def _graph_upload_diagnostico(conteudo, etag=None):
 	"""Envia o XLSX gerado pela aplicação ao arquivo remoto."""
 	token = _onedrive_token()
 	requisicao = Request(
@@ -176,8 +176,66 @@ def _graph_upload_diagnostico(conteudo):
 			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		},
 	)
+	if etag:
+		requisicao.add_header("If-Match", etag)
 	with urlopen(requisicao, timeout=60) as resposta:
 		return resposta.status
+
+
+def salvar_demanda_com_confirmacao(demanda):
+	"""Sincroniza uma demanda e confirma sua presença no arquivo remoto."""
+	arquivo_remoto = _graph_download_diagnostico()
+	metadata = _graph_metadata_diagnostico()
+	etag = metadata.get("eTag")
+	if not etag:
+		raise RuntimeError("O SharePoint não retornou o eTag do arquivo remoto.")
+	workbook = load_workbook(io.BytesIO(arquivo_remoto))
+	if "demandas" not in workbook.sheetnames:
+		workbook.close()
+		raise RuntimeError("O arquivo remoto não possui a aba demandas.")
+	planilha = workbook["demandas"]
+	nova_linha = [demanda[coluna] for coluna in TABELAS_EXCEL["demandas"]]
+	cabecalho = [celula.value for celula in planilha[1]]
+	try:
+		indice_id = cabecalho.index("id") + 1
+	except ValueError as erro:
+		workbook.close()
+		raise RuntimeError("A aba demandas não possui a coluna id.") from erro
+
+	linha_existente = None
+	for numero_linha in range(2, planilha.max_row + 1):
+		if planilha.cell(numero_linha, indice_id).value == demanda["id"]:
+			linha_existente = numero_linha
+			break
+	if linha_existente is None:
+		planilha.append(nova_linha)
+	else:
+		for numero_coluna, valor in enumerate(nova_linha, 1):
+			planilha.cell(linha_existente, numero_coluna).value = valor
+	buffer = io.BytesIO()
+	workbook.save(buffer)
+	workbook.close()
+	novo_xlsx = buffer.getvalue()
+	novo_hash = hashlib.sha256(novo_xlsx).hexdigest()
+	status = _graph_upload_diagnostico(novo_xlsx, etag=etag)
+	if status not in (200, 201):
+		raise RuntimeError(f"Falha ao gravar no SharePoint. HTTP={status}")
+
+	remoto_confirmacao = _graph_download_diagnostico()
+	workbook_confirmacao = load_workbook(io.BytesIO(remoto_confirmacao), read_only=True, data_only=True)
+	try:
+		if "demandas" not in workbook_confirmacao.sheetnames:
+			raise RuntimeError("Arquivo remoto não possui a aba demandas após a gravação.")
+		indice_id_confirmacao = [celula.value for celula in next(workbook_confirmacao["demandas"].iter_rows(min_row=1, max_row=1))].index("id")
+		encontrada = any(
+			linha[indice_id_confirmacao] == demanda["id"]
+			for linha in workbook_confirmacao["demandas"].iter_rows(min_row=2, values_only=True)
+		)
+	finally:
+		workbook_confirmacao.close()
+	if not encontrada:
+		raise RuntimeError("Arquivo remoto não contém a demanda recém gravada.")
+	return {"status": "OK", "hash_enviado": novo_hash, "hash_remoto": hashlib.sha256(remoto_confirmacao).hexdigest(), "mensagem": "Demanda cadastrada e confirmada no SharePoint."}
 
 
 def _criar_esquema(conn):
@@ -299,6 +357,15 @@ def conectar():
 		if CONEXAO_COMPARTILHADA is None:
 			CONEXAO_COMPARTILHADA = ConexaoExcel()
 		return CONEXAO_COMPARTILHADA
+
+
+def sincronizar_planilha():
+	"""Reconstrói o XLSX a partir do banco atual e envia ao SharePoint."""
+	with ARQUIVO_LOCK:
+		if CONEXAO_COMPARTILHADA is None:
+			raise RuntimeError("Banco da aplicação ainda não foi inicializado.")
+		_salvar_planilha(CONEXAO_COMPARTILHADA._conn)
+		return True
 
 
 def agora():
