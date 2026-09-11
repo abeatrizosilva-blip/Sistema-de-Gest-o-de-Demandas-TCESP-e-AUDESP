@@ -3,6 +3,16 @@ title Sistema de Gestao - SP Aguas
 
 cd /d "%~dp0"
 
+set "EXCEL_DATABASE=C:\Users\ana.silva\OneDrive - PRODESP\Banco de Dados - Sistema.xlsx"
+
+if not exist "%EXCEL_DATABASE%" (
+    echo Planilha do OneDrive nao encontrada:
+    echo %EXCEL_DATABASE%
+    echo Verifique se o OneDrive esta instalado e sincronizado.
+    pause
+    exit /b 1
+)
+
 echo Iniciando sistema...
 
 if not exist ".venv\Scripts\activate.bat" (
