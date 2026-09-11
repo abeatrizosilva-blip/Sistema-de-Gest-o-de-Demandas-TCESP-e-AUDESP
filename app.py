@@ -18,6 +18,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-S
 PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
 SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
 ARQUIVO_LOCK = RLock()
+CONEXAO_COMPARTILHADA = None
 
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
@@ -116,7 +117,7 @@ def _salvar_planilha(conn):
 
 class ConexaoExcel:
 	def __init__(self):
-		self._conn = sqlite3.connect(":memory:")
+		self._conn = sqlite3.connect(":memory:", check_same_thread=False)
 		self._conn.row_factory = sqlite3.Row
 		_criar_esquema(self._conn)
 		if not _carregar_planilha(self._conn):
@@ -134,11 +135,15 @@ class ConexaoExcel:
 			_salvar_planilha(self._conn)
 
 	def close(self):
-		self._conn.close()
+		pass
 
 
 def conectar():
-	return ConexaoExcel()
+	global CONEXAO_COMPARTILHADA
+	with ARQUIVO_LOCK:
+		if CONEXAO_COMPARTILHADA is None:
+			CONEXAO_COMPARTILHADA = ConexaoExcel()
+		return CONEXAO_COMPARTILHADA
 
 
 def agora():
