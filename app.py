@@ -34,16 +34,35 @@ def _env(*nomes, default=""):
 	return default
 
 
-ONEDRIVE_ENABLED = _env("SHAREPOINT_ENABLED", "ONEDRIVE_ENABLED").lower() in {"1", "true", "sim", "yes", "on"}
+# Credenciais continuam sendo obrigatoriamente configuradas no Vercel.
+# O usuário/pasta/arquivo possuem valores padrão conhecidos do projeto para
+# evitar que uma variável opcional ausente seja confundida com falha de integração.
+_raw_enabled = _env("SHAREPOINT_ENABLED", "ONEDRIVE_ENABLED")
 ONEDRIVE_TENANT_ID = _env("SHAREPOINT_TENANT_ID", "ONEDRIVE_TENANT_ID", "MICROSOFT_TENANT_ID")
 ONEDRIVE_CLIENT_ID = _env("SHAREPOINT_CLIENT_ID", "ONEDRIVE_CLIENT_ID", "MICROSOFT_CLIENT_ID")
 ONEDRIVE_CLIENT_SECRET = _env("SHAREPOINT_CLIENT_SECRET", "ONEDRIVE_CLIENT_SECRET", "MICROSOFT_CLIENT_SECRET")
-ONEDRIVE_USER = _env("SHAREPOINT_USER", "ONEDRIVE_USER", "MICROSOFT_USER", default="anabeatriz.silva@spaguas.sp.gov.br")
+ONEDRIVE_USER = _env(
+	"SHAREPOINT_USER", "ONEDRIVE_USER", "MICROSOFT_USER",
+	default="anabeatriz.silva@spaguas.sp.gov.br"
+)
+SHAREPOINT_FOLDER_PATH = _env("SHAREPOINT_FOLDER_PATH", "ONEDRIVE_FOLDER_PATH", default="SP_AGUAS")
+SHAREPOINT_FILE_NAME = _env(
+	"SHAREPOINT_FILE_NAME", "ONEDRIVE_FILE_NAME",
+	default="Sistema de Gestão de Demandas - SP Aguas.xlsx"
+)
 SHAREPOINT_FILE_PATH = _env(
 	"SHAREPOINT_FILE_PATH", "ONEDRIVE_PATH",
-	default="SP_AGUAS/Sistema de Gestão de Demandas - SP Aguas.xlsx"
+	default=f"{SHAREPOINT_FOLDER_PATH.strip('/')}/{SHAREPOINT_FILE_NAME}"
 )
-ONEDRIVE_PATH = os.environ.get("ONEDRIVE_PATH", SHAREPOINT_FILE_PATH)
+ONEDRIVE_PATH = SHAREPOINT_FILE_PATH
+
+# Se a flag não existir, habilita automaticamente quando as três credenciais
+# essenciais estiverem presentes. Se SHAREPOINT_ENABLED=false for informado,
+# a integração permanece explicitamente desabilitada.
+if _raw_enabled:
+	ONEDRIVE_ENABLED = _raw_enabled.lower() in {"1", "true", "sim", "yes", "on"}
+else:
+	ONEDRIVE_ENABLED = bool(ONEDRIVE_TENANT_ID and ONEDRIVE_CLIENT_ID and ONEDRIVE_CLIENT_SECRET)
 SHAREPOINT_ENABLED = ONEDRIVE_ENABLED
 SHAREPOINT_TENANT_ID = ONEDRIVE_TENANT_ID
 SHAREPOINT_CLIENT_ID = ONEDRIVE_CLIENT_ID
@@ -66,9 +85,11 @@ def _diagnostico_configuracao_sharepoint():
 		"SHAREPOINT_TENANT_ID": {"configurado": bool(SHAREPOINT_TENANT_ID), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_TENANT_ID else "ausente"},
 		"SHAREPOINT_CLIENT_ID": {"configurado": bool(SHAREPOINT_CLIENT_ID), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_CLIENT_ID else "ausente"},
 		"SHAREPOINT_CLIENT_SECRET": {"configurado": bool(SHAREPOINT_CLIENT_SECRET), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_CLIENT_SECRET else "ausente"},
-		"SHAREPOINT_FILE_PATH": {"configurado": bool(SHAREPOINT_FILE_PATH), "obrigatorio": True, "valor_seguro": SHAREPOINT_FILE_PATH if SHAREPOINT_FILE_PATH else "ausente"},
 		"SHAREPOINT_USER": {"configurado": bool(ONEDRIVE_USER), "obrigatorio": not usa_site_drive, "valor_seguro": ONEDRIVE_USER if ONEDRIVE_USER else "ausente"},
-			"SHAREPOINT_SITE_ID": {"configurado": bool(SHAREPOINT_SITE_ID), "obrigatorio": False, "valor_seguro": "preenchido" if SHAREPOINT_SITE_ID else "não utilizado"},
+		"SHAREPOINT_FOLDER_PATH": {"configurado": bool(SHAREPOINT_FOLDER_PATH), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FOLDER_PATH},
+		"SHAREPOINT_FILE_NAME": {"configurado": bool(SHAREPOINT_FILE_NAME), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FILE_NAME},
+		"SHAREPOINT_FILE_PATH": {"configurado": bool(SHAREPOINT_FILE_PATH), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FILE_PATH},
+		"SHAREPOINT_SITE_ID": {"configurado": bool(SHAREPOINT_SITE_ID), "obrigatorio": False, "valor_seguro": "preenchido" if SHAREPOINT_SITE_ID else "não utilizado"},
 		"SHAREPOINT_DRIVE_ID": {"configurado": bool(SHAREPOINT_DRIVE_ID), "obrigatorio": False, "valor_seguro": "preenchido" if SHAREPOINT_DRIVE_ID else "não utilizado"},
 	}
 	faltantes = [nome for nome, item in itens.items() if item["obrigatorio"] and not item["configurado"]]
@@ -116,15 +137,94 @@ def _onedrive_token():
 		raise RuntimeError(f"Nao foi possivel autenticar no Microsoft Graph: {erro}") from erro
 
 
-def _onedrive_url():
-	caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
-	# Se SITE_ID/DRIVE_ID estiverem definidos, mantém compatibilidade com SharePoint.
+def _onedrive_path_metadata_url():
+	"""URL de metadados para localizar a pasta/arquivo por caminho no Graph."""
 	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-		return f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
+		caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
+		return (
+			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
+			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}"
+		)
 	if not ONEDRIVE_USER:
-		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório quando SITE_ID e DRIVE_ID não forem usados.")
+		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório para localizar o arquivo no OneDrive.")
 	usuario = quote(ONEDRIVE_USER, safe="")
-	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}:/content"
+	caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
+	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}"
+
+
+def _onedrive_folder_metadata_url():
+	"""URL de metadados da pasta do projeto no OneDrive."""
+	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
+		caminho = quote(SHAREPOINT_FOLDER_PATH.strip("/"), safe="/")
+		return (
+			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
+			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}"
+		)
+	if not ONEDRIVE_USER:
+		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório para localizar a pasta.")
+	usuario = quote(ONEDRIVE_USER, safe="")
+	caminho = quote(SHAREPOINT_FOLDER_PATH.strip("/"), safe="/")
+	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}"
+
+
+def _resolver_arquivo_graph(token):
+	"""Localiza primeiro a pasta e depois o arquivo, retornando seus metadados."""
+	base_headers = {"Authorization": f"Bearer {token}"}
+	try:
+		with urlopen(Request(_onedrive_folder_metadata_url(), headers=base_headers), timeout=30) as resposta:
+			pasta = json.loads(resposta.read().decode("utf-8"))
+	except HTTPError as erro:
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
+		if erro.code == 404:
+			raise RuntimeError(
+				f"Pasta '{SHAREPOINT_FOLDER_PATH}' não foi localizada no OneDrive de '{ONEDRIVE_USER}'."
+			) from erro
+		if erro.code in (401, 403):
+			raise RuntimeError(
+				f"Microsoft Graph recusou o acesso à pasta '{SHAREPOINT_FOLDER_PATH}' (HTTP {erro.code}). "
+				"Verifique Files.ReadWrite.All e o consentimento administrativo."
+			) from erro
+		raise RuntimeError(f"Falha ao localizar a pasta no Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
+
+	pasta_id = pasta.get("id")
+	if not pasta_id:
+		raise RuntimeError(f"O Graph localizou a pasta '{SHAREPOINT_FOLDER_PATH}', mas não retornou o ID dela.")
+
+	# O endpoint por caminho abaixo resolve o arquivo dentro da pasta encontrada.
+	try:
+		with urlopen(Request(_onedrive_path_metadata_url(), headers=base_headers), timeout=30) as resposta:
+			arquivo = json.loads(resposta.read().decode("utf-8"))
+	except HTTPError as erro:
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
+		if erro.code == 404:
+			raise RuntimeError(
+				f"Arquivo '{SHAREPOINT_FILE_NAME}' não foi localizado dentro da pasta "
+				f"'{SHAREPOINT_FOLDER_PATH}'."
+			) from erro
+		if erro.code in (401, 403):
+			raise RuntimeError(
+				f"Microsoft Graph recusou o acesso ao arquivo '{SHAREPOINT_FILE_NAME}' (HTTP {erro.code})."
+			) from erro
+		raise RuntimeError(f"Falha ao localizar o arquivo no Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
+
+	arquivo_id = arquivo.get("id")
+	if not arquivo_id:
+		raise RuntimeError(f"O Graph localizou '{SHAREPOINT_FILE_NAME}', mas não retornou o ID do arquivo.")
+	return pasta, arquivo
+
+
+def _onedrive_url():
+	"""Retorna a URL de conteúdo do arquivo, resolvendo pasta e arquivo pelo Graph."""
+	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
+		caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
+		return (
+			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
+			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
+		)
+	token = _onedrive_token()
+	_, arquivo = _resolver_arquivo_graph(token)
+	usuario = quote(ONEDRIVE_USER, safe="")
+	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/{quote(arquivo['id'], safe='')}/content"
 
 
 def obter_planilha():
@@ -171,12 +271,14 @@ def _enviar_planilha_one_drive():
 
 
 def _graph_metadata_diagnostico():
-	"""Obtém os metadados do arquivo remoto no SharePoint."""
+	"""Obtém os metadados do arquivo remoto no SharePoint/OneDrive."""
 	token = _onedrive_token()
-	url = _onedrive_url().replace("/content", "")
-	requisicao = Request(url, headers={"Authorization": f"Bearer {token}"})
-	with urlopen(requisicao, timeout=30) as resposta:
-		return json.loads(resposta.read().decode("utf-8"))
+	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
+		url = _onedrive_path_metadata_url()
+		with urlopen(Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=30) as resposta:
+			return json.loads(resposta.read().decode("utf-8"))
+	_, arquivo = _resolver_arquivo_graph(token)
+	return arquivo
 
 
 def _graph_download_diagnostico():
@@ -203,12 +305,14 @@ def _graph_upload_diagnostico(conteudo, etag=None):
 	except HTTPError as erro:
 		detalhe = erro.read().decode("utf-8", errors="replace")[:1200]
 		if erro.code == 412:
-			# Conflito de versão: outra instância alterou o arquivo depois do nosso GET.
 			raise ConcurrentUpdateError("O arquivo do SharePoint foi alterado por outra instância durante a gravação.") from erro
 		if erro.code in (401, 403):
 			raise RuntimeError("Microsoft Graph recusou a gravação. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
 		if erro.code == 404:
-			raise RuntimeError(f"Arquivo não localizado para gravação. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'.") from erro
+			raise RuntimeError(
+				f"Arquivo '{SHAREPOINT_FILE_NAME}' não localizado para gravação dentro de "
+				f"'{SHAREPOINT_FOLDER_PATH}'."
+			) from erro
 		raise RuntimeError(f"Falha SharePoint HTTP {erro.code}: {detalhe}") from erro
 
 
@@ -281,9 +385,7 @@ def salvar_demanda_atomicamente(valores, usuario_id, tentativas=3):
 	recomeça sobre a versão mais nova, evitando lost update.
 	"""
 	if not _onedrive_configurado():
-		d = _diagnostico_configuracao_sharepoint()
-		faltantes = ", ".join(d["faltantes"]) or "SHAREPOINT_ENABLED está desabilitado"
-		raise RuntimeError(f"Integração Microsoft Graph não configurada no ambiente Vercel. Variável(is) ausente(s): {faltantes}.")
+		raise RuntimeError("Integração SharePoint não está configurada.")
 
 	for tentativa in range(1, tentativas + 1):
 		with ARQUIVO_LOCK:
@@ -1241,7 +1343,12 @@ def status():
 	if (resposta := acesso_login()): return resposta
 	resultado = {"status": "OK", "sharepoint_configurado": _onedrive_configurado(), "planilha_local": PLANILHA, "vercel": bool(os.environ.get("VERCEL"))}
 	if not _onedrive_configurado():
-		resultado.update(status="ERRO", erro="Variáveis do SharePoint não estão completas.")
+		diagnostico = _diagnostico_configuracao_sharepoint()
+		resultado.update(
+			status="ERRO",
+			erro=f"Integração Microsoft Graph não configurada. Faltantes: {', '.join(diagnostico['faltantes']) or 'SHAREPOINT_ENABLED está desabilitado'}.",
+			configuracao=diagnostico,
+		)
 		return jsonify(resultado), 500
 	try:
 		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=30) as resposta:
@@ -1265,8 +1372,10 @@ def teste_integracao():
 	resultado = {
 		"teste": "Integração SP ÁGUAS + Microsoft Graph + OneDrive/SharePoint",
 		"status_final": "INICIANDO",
-		"arquivo": SHAREPOINT_FILE_PATH,
-		"endpoint_graph": _onedrive_url() if config["configurada"] else None,
+		"pasta": SHAREPOINT_FOLDER_PATH,
+		"arquivo": SHAREPOINT_FILE_NAME,
+		"caminho_completo": SHAREPOINT_FILE_PATH,
+		"endpoint_graph": _onedrive_path_metadata_url() if config["configurada"] else None,
 		"observacao": "Este teste é somente leitura e não altera o Excel.",
 		"etapas": [],
 	}
@@ -1297,24 +1406,38 @@ def teste_integracao():
 		return jsonify(resultado), 500
 
 	try:
-		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
+		pasta, meta_arquivo = _resolver_arquivo_graph(token)
+		etapa(
+			3, "Localização da pasta e do arquivo", "OK",
+			"O Graph localizou a pasta e o arquivo pelo caminho informado.",
+			pasta_id=pasta.get("id"),
+			arquivo_id=meta_arquivo.get("id"),
+			nome_arquivo=meta_arquivo.get("name"),
+			caminho_graph=meta_arquivo.get("parentReference", {}).get("path"),
+		)
+		usuario = quote(ONEDRIVE_USER, safe="")
+		content_url = (
+			f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/"
+			f"{quote(meta_arquivo['id'], safe='')}/content"
+			if not (SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID)
+			else _onedrive_url()
+		)
+		with urlopen(Request(content_url, headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
 			arquivo = resposta.read()
 			status_http = resposta.status
-		etapa(3, "Acesso ao Excel no Microsoft Graph", "OK", "O arquivo remoto foi localizado e baixado.",
+		etapa(4, "Download e validação do Excel", "OK", "O arquivo remoto foi localizado e baixado.",
 			status_http=status_http, tamanho_bytes=len(arquivo),
 			sha256=hashlib.sha256(arquivo).hexdigest())
 	except HTTPError as erro:
 		detalhe = erro.read().decode("utf-8", errors="replace")[:1200]
-		mensagem = f"Graph retornou HTTP {erro.code}: {detalhe}"
-		etapa(3, "Acesso ao Excel no Microsoft Graph", "ERRO", mensagem)
+		etapa(3, "Localização da pasta e do arquivo", "ERRO", f"Graph retornou HTTP {erro.code}: {detalhe}")
 		resultado["status_final"] = "FALHA_ACESSO_GRAPH"
-		resultado["mensagem_final"] = (
-			"HTTP 401/403 normalmente indica credenciais ou permissões; HTTP 404 normalmente indica caminho do arquivo incorreto."
-		)
+		resultado["mensagem_final"] = "Verifique credenciais/permissões e o nome exato da pasta e do arquivo."
 		return jsonify(resultado), 500
 	except Exception as erro:
-		etapa(3, "Acesso ao Excel no Microsoft Graph", "ERRO", str(erro))
+		etapa(3, "Localização da pasta e do arquivo", "ERRO", str(erro))
 		resultado["status_final"] = "FALHA_ACESSO_GRAPH"
+		resultado["mensagem_final"] = "Verifique se a pasta SP_AGUAS e o arquivo Excel existem no OneDrive corporativo."
 		return jsonify(resultado), 500
 
 	try:
@@ -1324,17 +1447,17 @@ def teste_integracao():
 		exigidas = ["usuarios", "demandas", "historico"]
 		faltantes_abas = [aba for aba in exigidas if aba not in abas]
 		if faltantes_abas:
-			etapa(4, "Validação do Excel", "ERRO", "O arquivo foi acessado, mas faltam abas obrigatórias.", abas=abas, faltantes=faltantes_abas)
+			etapa(5, "Validação do Excel", "ERRO", "O arquivo foi acessado, mas faltam abas obrigatórias.", abas=abas, faltantes=faltantes_abas)
 			resultado["status_final"] = "FALHA_ESTRUTURA_EXCEL"
 			return jsonify(resultado), 500
-		etapa(4, "Validação do Excel", "OK", "XLSX válido e abas obrigatórias encontradas.", abas=abas)
+		etapa(5, "Validação do Excel", "OK", "XLSX válido e abas obrigatórias encontradas.", abas=abas)
 	except Exception as erro:
-		etapa(4, "Validação do Excel", "ERRO", str(erro))
+		etapa(5, "Validação do Excel", "ERRO", str(erro))
 		resultado["status_final"] = "FALHA_VALIDACAO_EXCEL"
 		return jsonify(resultado), 500
 
 	resultado["status_final"] = "OK"
-	resultado["mensagem_final"] = "CONEXÃO MICROSOFT GRAPH + EXCEL OK. O teste foi concluído sem alterar o arquivo remoto."
+	resultado["mensagem_final"] = "CONEXÃO MICROSOFT GRAPH + PASTA + ARQUIVO EXCEL OK. O teste foi concluído sem alterar o arquivo remoto."
 	return jsonify(resultado), 200
 
 
@@ -1364,9 +1487,7 @@ def diagnostico_sync():
 
 	try:
 		if not _onedrive_configurado():
-			d = _diagnostico_configuracao_sharepoint()
-			faltantes = ", ".join(d["faltantes"]) or "SHAREPOINT_ENABLED está desabilitado"
-			raise RuntimeError(f"Integração Microsoft Graph não configurada no ambiente Vercel. Variável(is) ausente(s): {faltantes}.")
+			raise RuntimeError("Integração SharePoint desabilitada ou incompleta.")
 		etapa(1, "Configuração", "OK", "Configuração do Microsoft Graph está preenchida.", caminho=SHAREPOINT_FILE_PATH)
 	except Exception as erro:
 		return falha(1, "Configuração", erro)
