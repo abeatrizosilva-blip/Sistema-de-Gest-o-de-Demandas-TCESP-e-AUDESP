@@ -10,7 +10,7 @@
 
 const COLUNAS: Record<string, string[]> = {
   usuarios: ["id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"],
-  demandas: ["id", "numero_processo", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "criado_por", "criado_em", "atualizado_em"],
+  demandas: ["id", "numero_processo", "numero_etc", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "doe_data", "doe_edicao", "doe_secao", "doe_palavra_chave", "doe_publicacao", "doe_url", "criado_por", "criado_em", "atualizado_em"],
   historico: ["id", "demanda_id", "usuario_id", "acao", "descricao", "data_hora"]
 };
 

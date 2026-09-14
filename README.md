@@ -50,3 +50,18 @@ Não configure `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID` ou `SHAREPOINT_CLI
 ### Observação
 
 O conector Excel Online (Business) suporta arquivos em OneDrive for Business e SharePoint. A Microsoft também documenta limitações para gravações concorrentes no mesmo workbook; por isso o fluxo deve ser configurado com concorrência controlada.
+
+
+## Novas funcionalidades — ETC e DOE-TCESP
+
+A tela **Nova demanda** passou a permitir:
+- cadastro do **Número ETC correspondente** ao processo;
+- pesquisa da edição diária oficial do **DOE-TCESP** por data;
+- filtro por palavras-chave institucionais do SP ÁGUAS/DAEE e nomes informados;
+- visualização do trecho localizado e da página do PDF;
+- botão **Usar esta publicação**, que preenche os campos do DOE e, quando identificado, o número de processo;
+- armazenamento dos dados da publicação junto à demanda;
+- pesquisa das demandas também por ETC e conteúdo do DOE;
+- exportação dos dados ETC/DOE para Excel.
+
+A pesquisa utiliza o PDF oficial do DOE-TCESP no domínio `doe.tce.sp.gov.br`. A aplicação não baixa conteúdo de sites de terceiros para essa finalidade.

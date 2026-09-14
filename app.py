@@ -11,11 +11,16 @@ import uuid
 from threading import RLock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
+from unicodedata import normalize as unicode_normalize
 from urllib.request import Request, urlopen
 
 import bcrypt
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
+try:
+	from pypdf import PdfReader
+except ImportError:
+	PdfReader = None
 from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
 
@@ -54,7 +59,7 @@ ONEDRIVE_PATH = SHAREPOINT_FILE_PATH
 
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
-	"demandas": ("id", "numero_processo", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "criado_por", "criado_em", "atualizado_em"),
+	"demandas": ("id", "numero_processo", "numero_etc", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "doe_data", "doe_edicao", "doe_secao", "doe_palavra_chave", "doe_publicacao", "doe_url", "criado_por", "criado_em", "atualizado_em"),
 	"historico": ("id", "demanda_id", "usuario_id", "acao", "descricao", "data_hora"),
 }
 
@@ -116,12 +121,10 @@ def _workbook_para_snapshot(conteudo):
 				continue
 			cabecalho = [str(v).strip() if v is not None else "" for v in linhas[0]]
 			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
-			if len(indices) != len(colunas):
-				raise RuntimeError(f"A aba {tabela} não possui todas as colunas esperadas.")
 			for linha in linhas[1:]:
 				if not any(v is not None for v in linha):
 					continue
-				resultado[tabela].append({nome: _normalizar_valor_excel(linha[indices[nome]]) for nome in colunas})
+				resultado[tabela].append({nome: _normalizar_valor_excel(linha[indices[nome]]) if nome in indices and indices[nome] < len(linha) else "" for nome in colunas})
 		return resultado
 	finally:
 		workbook.close()
@@ -373,12 +376,10 @@ def _carregar_xlsx_bytes_na_conexao(conn, conteudo):
 			planilha = workbook[tabela]
 			cabecalho = [c.value for c in next(planilha.iter_rows(min_row=1, max_row=1))]
 			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
-			if len(indices) != len(colunas):
-				continue
 			for linha in planilha.iter_rows(min_row=2, values_only=True):
 				if not any(v is not None for v in linha):
 					continue
-				valores_linha = tuple(linha[indices[c]] for c in colunas)
+				valores_linha = tuple(linha[indices[c]] if c in indices and indices[c] < len(linha) else "" for c in colunas)
 				conn._conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", valores_linha)
 	finally:
 		workbook.close()
@@ -513,9 +514,11 @@ def _criar_esquema(conn):
 			aprovado INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS demandas (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, origem TEXT NOT NULL,
-			assunto TEXT NOT NULL, area TEXT, responsavel TEXT, data_recebimento TEXT,
-			prazo_area TEXT, prazo_fatal TEXT, situacao TEXT, prioridade TEXT, observacoes TEXT,
+			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, numero_etc TEXT,
+			origem TEXT NOT NULL, assunto TEXT NOT NULL, area TEXT, responsavel TEXT,
+			data_recebimento TEXT, prazo_area TEXT, prazo_fatal TEXT, situacao TEXT,
+			prioridade TEXT, observacoes TEXT, doe_data TEXT, doe_edicao TEXT,
+			doe_secao TEXT, doe_palavra_chave TEXT, doe_publicacao TEXT, doe_url TEXT,
 			criado_por INTEGER, criado_em TEXT NOT NULL, atualizado_em TEXT
 		);
 		CREATE TABLE IF NOT EXISTS historico (
@@ -536,8 +539,6 @@ def _carregar_planilha(conn):
 			planilha = workbook[tabela]
 			cabecalho = [celula.value for celula in next(planilha.iter_rows(min_row=1, max_row=1))]
 			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
-			if len(indices) != len(colunas):
-				continue
 			for linha in planilha.iter_rows(min_row=2, values_only=True):
 				if not any(valor is not None for valor in linha):
 					continue
@@ -728,17 +729,24 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=3):
 
 def _append_registro(planilha, colunas, registro):
 	cabecalho = _cabecalho_planilha(planilha)
-	if not all(c in cabecalho for c in colunas):
-		raise RuntimeError(f"A aba {planilha.title} não possui todas as colunas esperadas.")
+	# Migração transparente: acrescenta as novas colunas ao Excel antigo.
+	for nome in colunas:
+		if nome not in cabecalho:
+			planilha.cell(1, planilha.max_column + 1).value = nome
+			cabecalho.append(nome)
 	linha = planilha.max_row + 1
 	for coluna, nome in enumerate(cabecalho, start=1):
 		if nome in colunas:
-			planilha.cell(linha, coluna).value = registro[nome]
+			planilha.cell(linha, coluna).value = registro.get(nome, "")
 	return linha
 
 
 def _atualizar_registro(planilha, colunas, registro_id, registro):
 	cabecalho = _cabecalho_planilha(planilha)
+	for nome in colunas:
+		if nome not in cabecalho:
+			planilha.cell(1, planilha.max_column + 1).value = nome
+			cabecalho.append(nome)
 	linha = _linha_por_id(planilha, cabecalho, registro_id)
 	if linha is None:
 		raise RuntimeError(f"Registro {registro_id} não encontrado na aba {planilha.title}.")
@@ -773,9 +781,11 @@ def criar_banco():
 			aprovado INTEGER NOT NULL DEFAULT 0, criado_em TEXT NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS demandas (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, origem TEXT NOT NULL,
-			assunto TEXT NOT NULL, area TEXT, responsavel TEXT, data_recebimento TEXT,
-			prazo_area TEXT, prazo_fatal TEXT, situacao TEXT, prioridade TEXT, observacoes TEXT,
+			id INTEGER PRIMARY KEY AUTOINCREMENT, numero_processo TEXT, numero_etc TEXT,
+			origem TEXT NOT NULL, assunto TEXT NOT NULL, area TEXT, responsavel TEXT,
+			data_recebimento TEXT, prazo_area TEXT, prazo_fatal TEXT, situacao TEXT,
+			prioridade TEXT, observacoes TEXT, doe_data TEXT, doe_edicao TEXT,
+			doe_secao TEXT, doe_palavra_chave TEXT, doe_publicacao TEXT, doe_url TEXT,
 			criado_por INTEGER, criado_em TEXT NOT NULL, atualizado_em TEXT
 		);
 		CREATE TABLE IF NOT EXISTS historico (
@@ -784,7 +794,12 @@ def criar_banco():
 		);
 	""")
 	colunas_demandas = {linha[1] for linha in conn.execute("PRAGMA table_info(demandas)")}
-	for coluna, definicao in (("criado_por", "INTEGER"), ("atualizado_em", "TEXT")):
+	for coluna, definicao in (
+		("numero_etc", "TEXT"), ("doe_data", "TEXT"), ("doe_edicao", "TEXT"),
+		("doe_secao", "TEXT"), ("doe_palavra_chave", "TEXT"),
+		("doe_publicacao", "TEXT"), ("doe_url", "TEXT"),
+		("criado_por", "INTEGER"), ("atualizado_em", "TEXT")
+	):
 		if coluna not in colunas_demandas:
 			conn.execute(f"ALTER TABLE demandas ADD COLUMN {coluna} {definicao}")
 	conn.commit()
@@ -1036,11 +1051,19 @@ def cadastro():
 
 
 def ler_demanda_form():
-	return tuple(request.form.get(c, "").strip() for c in ("numero", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes"))
+	return tuple(request.form.get(c, "").strip() for c in (
+		"numero", "numero_etc", "origem", "assunto", "area", "responsavel",
+		"data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade",
+		"observacoes", "doe_data", "doe_edicao", "doe_secao", "doe_palavra_chave",
+		"doe_publicacao", "doe_url"
+	))
 
 
 def validar_demanda(valores):
-	campos = ("numero do processo", "origem", "assunto", "área", "responsável", "data de recebimento", "prazo da área", "prazo fatal", "situação", "prioridade", "observações")
+	campos = ("numero do processo", "número ETC", "origem", "assunto", "área", "responsável",
+		"data de recebimento", "prazo da área", "prazo fatal", "situação", "prioridade",
+		"observações", "data DOE", "edição DOE", "seção DOE", "palavra-chave DOE",
+		"publicação DOE", "URL DOE")
 	dados = dict(zip(campos, valores))
 	if not dados["origem"] or not dados["assunto"] or not dados["prazo fatal"]:
 		return "Preencha a origem, o assunto e o prazo fatal."
@@ -1081,6 +1104,80 @@ def sistema():
     return pagina("Dashboard", html_dashboard)
 
 
+DOE_KEYWORDS = [
+    "AGUAS", "AGENCIA", "DEPARTAMENTO DE AGUAS E ENERGIA ELETRICA", "DAEE",
+    "SP AGUAS", "AGENCIA DE AGUAS DO ESTADO DE SÃO PAULO", "RICARDO DARUIZ BORSARI",
+    "ALCEU SEGAMARCHI", "FRANCISCO EDUARDO LODUCCA", "CAMILA ROCHA CUNHA VIANA",
+    "PAOLA SANCHEZ VALLEJO DE MORAES FORJAZ", "Ana Paula Zubiaurre Brites",
+    "Anderson Barboza Esteves", "Nelson de Campos Lima", "Adriano Rafael Arre­pia de Queiroz",
+]
+DOE_BASE_URL = "https://doe.tce.sp.gov.br/v/pdf/{ano:04d}/{mes:02d}/doe-tce-{data}.pdf"
+
+def _normalizar_pesquisa_doe(texto):
+    texto = unicode_normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode("ascii")
+    return " ".join(texto.upper().split())
+
+def _url_pdf_doe(data_iso):
+    dt = datetime.strptime(data_iso, "%Y-%m-%d").date()
+    return DOE_BASE_URL.format(ano=dt.year, mes=dt.month, data=dt.strftime("%Y-%m-%d"))
+
+def _buscar_doe_pdf(data_iso):
+    url = _url_pdf_doe(data_iso)
+    req = Request(url, headers={"User-Agent": "SP-AGUAS/1.0"})
+    try:
+        with urlopen(req, timeout=25) as resposta:
+            return resposta.read(), url
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError("A edição PDF não foi encontrada para essa data. Verifique a data de publicação no DOE-TCESP.") from exc
+        raise RuntimeError(f"DOE-TCESP retornou HTTP {exc.code}.") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Não foi possível acessar o DOE-TCESP: {exc}") from exc
+
+def _processos_no_texto(texto):
+    encontrados = []
+    for padrao in (r"\b(?:TC|TCESP|eTC|ETC)[-\s]?\d{1,8}[/.-]\d{1,4}[/.-]\d{2,4}\b", r"\b\d{5,8}/\d{2,4}\b"):
+        encontrados.extend(re.findall(padrao, texto, flags=re.I))
+    vistos=[]
+    for item in encontrados:
+        item=re.sub(r"\s+","",item)
+        if item not in vistos: vistos.append(item)
+    return vistos[:10]
+
+def _extrair_ocorrencias_doe(conteudo, data_iso, url, palavra_chave=""):
+    if PdfReader is None:
+        raise RuntimeError("Dependência pypdf não instalada. Execute pip install -r requirements.txt.")
+    try: reader=PdfReader(io.BytesIO(conteudo))
+    except Exception as exc: raise RuntimeError(f"Não foi possível ler o PDF do DOE-TCESP: {exc}") from exc
+    termos=[palavra_chave] if palavra_chave else DOE_KEYWORDS
+    resultados=[]
+    for pagina_num,page in enumerate(reader.pages,start=1):
+        try: texto=page.extract_text() or ""
+        except Exception: texto=""
+        normalizado=_normalizar_pesquisa_doe(texto)
+        if not normalizado: continue
+        for termo in termos:
+            alvo=_normalizar_pesquisa_doe(termo); pos=normalizado.find(alvo)
+            if pos<0: continue
+            inicio=max(0,pos-280); fim=min(len(texto),pos+len(termo)+420)
+            trecho=" ".join(texto[inicio:fim].split())
+            resultados.append({"data":data_iso,"edicao":"DOE-TCESP","secao":f"Página {pagina_num}","palavra_chave":termo,"trecho":trecho,"pagina":pagina_num,"url":url,"processos":_processos_no_texto(trecho)})
+    return resultados[:100]
+
+@app.route("/api/doe-tcesp/pesquisar")
+def pesquisar_doe_tcesp():
+    if (resposta := acesso_login()): return resposta
+    data_iso=request.args.get("data","").strip(); palavra=request.args.get("palavra_chave","").strip()
+    try: datetime.strptime(data_iso,"%Y-%m-%d")
+    except ValueError: return jsonify({"erro":"Informe uma data válida no formato AAAA-MM-DD.","resultados":[]}),400
+    if palavra and _normalizar_pesquisa_doe(palavra) not in {_normalizar_pesquisa_doe(k) for k in DOE_KEYWORDS}:
+        return jsonify({"erro":"Palavra-chave não cadastrada.","resultados":[]}),400
+    try:
+        pdf,url=_buscar_doe_pdf(data_iso); resultados=_extrair_ocorrencias_doe(pdf,data_iso,url,palavra)
+        return jsonify({"data":data_iso,"url":url,"resultados":resultados})
+    except Exception as exc:
+        return jsonify({"erro":str(exc),"resultados":[]}),502
+
 @app.route("/nova-demanda", methods=["GET", "POST"])
 def nova_demanda():
 	if (resposta := acesso_login()): return resposta
@@ -1108,7 +1205,72 @@ def formulario(demanda=None):
     situacao_options = ''.join(f'<option {escolhido("situacao", o)}>{o}</option>' for o in situacoes)
     prioridade_options = ''.join(f'<option {escolhido("prioridade", o)}>{o}</option>' for o in prioridades)
     historico_link = f'<a class="btn btn-outline" href="/historico/{demanda["id"]}">Ver histórico</a>' if demanda else ''
-    return f'<div class="page-head"><div><h1>{titulo}</h1><p>{subtitulo}</p></div><a class="btn btn-outline" href="/demandas">← Voltar</a></div><div class="card"><form method="post"><div class="form-section"><h3>Identificação</h3><div class="form-grid"><div><label>Número do processo</label><input name="numero" value="{valor("numero_processo")}" placeholder="Ex.: TC-000000/000/00"></div><div><label>Origem</label><select name="origem"><option {escolhido("origem","TCE-SP")}>TCE-SP</option><option {escolhido("origem","AUDESP")}>AUDESP</option><option {escolhido("origem","Outro")}>Outro</option></select></div><div class="full"><label>Assunto</label><textarea name="assunto" required placeholder="Descreva de forma objetiva o assunto da demanda">{valor("assunto")}</textarea></div></div></div><div class="form-section"><h3>Responsabilidade</h3><div class="form-grid"><div><label>Área</label><input name="area" value="{valor("area")}" placeholder="Área responsável"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}" placeholder="Nome do responsável"></div></div></div><div class="form-section"><h3>Prazos e classificação</h3><div class="form-grid three"><div><label>Data de recebimento</label><input type="date" name="data_recebimento" value="{valor("data_recebimento")}"></div><div><label>Prazo da área</label><input type="date" name="prazo_area" value="{valor("prazo_area")}"></div><div><label>Prazo fatal</label><input type="date" name="prazo_fatal" value="{valor("prazo_fatal") }" required></div><div><label>Situação</label><select name="situacao">{situacao_options}</select></div><div><label>Prioridade</label><select name="prioridade">{prioridade_options}</select></div></div></div><div class="form-section"><h3>Observações</h3><textarea name="observacoes" placeholder="Informações complementares, providências ou observações internas">{valor("observacoes")}</textarea></div><div class="form-actions"><button type="submit">✓ {"Salvar alterações" if demanda else "Cadastrar demanda"}</button><a class="btn btn-cinza" href="/demandas">Cancelar</a>{historico_link}</div></form></div>'
+    doe_keywords = json.dumps(DOE_KEYWORDS, ensure_ascii=False)
+    return f"""<div class="page-head"><div><h1>{titulo}</h1><p>{subtitulo}</p></div><a class="btn btn-outline" href="/demandas">← Voltar</a></div>
+<div class="card"><form method="post">
+<div class="form-section"><h3>Identificação</h3><div class="form-grid">
+<div><label>Número do processo</label><input name="numero" value="{valor("numero_processo")}" placeholder="Ex.: TC-000000/000/00"></div>
+<div><label>Número ETC correspondente</label><input name="numero_etc" value="{valor("numero_etc")}" placeholder="Ex.: ETC-000000"></div>
+<div><label>Origem</label><select name="origem"><option {escolhido("origem","TCE-SP")}>TCE-SP</option><option {escolhido("origem","AUDESP")}>AUDESP</option><option {escolhido("origem","Outro")}>Outro</option></select></div>
+<div class="full"><label>Assunto</label><textarea name="assunto" required placeholder="Descreva de forma objetiva o assunto da demanda">{valor("assunto")}</textarea></div>
+</div></div>
+<div class="form-section"><h3>Publicação diária — DOE-TCESP</h3>
+<p class="muted">Pesquise a edição oficial do Diário Oficial do TCESP por data e pelas palavras-chave cadastradas.</p>
+<div class="form-grid">
+<div><label>Data da publicação</label><input type="date" id="doe_pesquisa_data" value="{valor("doe_data")}"></div>
+<div><label>Palavra-chave</label><select id="doe_pesquisa_keyword"><option value="">Todas as palavras-chave</option></select></div>
+<div class="full"><button type="button" class="btn btn-outline" onclick="pesquisarDOE()">🔎 Pesquisar publicação do DOE-TCESP</button></div>
+</div>
+<div id="doe_status" class="muted" style="margin-top:10px"></div><div id="doe_resultados" style="margin-top:12px"></div>
+<div class="form-grid" style="margin-top:12px">
+<div><label>Data DOE</label><input name="doe_data" id="doe_data" value="{valor("doe_data")}" readonly></div>
+<div><label>Edição DOE</label><input name="doe_edicao" id="doe_edicao" value="{valor("doe_edicao")}" placeholder="Ex.: edição diária"></div>
+<div><label>Seção DOE</label><input name="doe_secao" id="doe_secao" value="{valor("doe_secao")}"></div>
+<div><label>Palavra-chave encontrada</label><input name="doe_palavra_chave" id="doe_palavra_chave" value="{valor("doe_palavra_chave")}" readonly></div>
+<div class="full"><label>Publicação / trecho localizado</label><textarea name="doe_publicacao" id="doe_publicacao" placeholder="O trecho da publicação selecionada aparecerá aqui.">{valor("doe_publicacao")}</textarea></div>
+<div class="full"><label>Link oficial da publicação</label><input name="doe_url" id="doe_url" value="{valor("doe_url")}" readonly></div>
+</div></div>
+<div class="form-section"><h3>Responsabilidade</h3><div class="form-grid"><div><label>Área</label><input name="area" value="{valor("area")}" placeholder="Área responsável"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}" placeholder="Nome do responsável"></div></div></div>
+<div class="form-section"><h3>Prazos e classificação</h3><div class="form-grid three">
+<div><label>Data de recebimento</label><input type="date" name="data_recebimento" value="{valor("data_recebimento")}"></div>
+<div><label>Prazo da área</label><input type="date" name="prazo_area" value="{valor("prazo_area")}"></div>
+<div><label>Prazo fatal</label><input type="date" name="prazo_fatal" value="{valor("prazo_fatal")}" required></div>
+<div><label>Situação</label><select name="situacao">{situacao_options}</select></div><div><label>Prioridade</label><select name="prioridade">{prioridade_options}</select></div>
+</div></div>
+<div class="form-section"><h3>Observações</h3><textarea name="observacoes" placeholder="Informações complementares, providências ou observações internas">{valor("observacoes")}</textarea></div>
+<div class="form-actions"><button type="submit">✓ {"Salvar alterações" if demanda else "Cadastrar demanda"}</button><a class="btn btn-cinza" href="/demandas">Cancelar</a>{historico_link}</div>
+</form></div>
+<script>
+const DOE_KEYWORDS = {doe_keywords};
+(function() {{
+  const select = document.getElementById("doe_pesquisa_keyword");
+  DOE_KEYWORDS.forEach(k => {{ const o=document.createElement("option"); o.value=k; o.textContent=k; if(k===document.getElementById("doe_palavra_chave").value)o.selected=true; select.appendChild(o); }});
+}})();
+async function pesquisarDOE() {{
+  const data=document.getElementById("doe_pesquisa_data").value, palavra=document.getElementById("doe_pesquisa_keyword").value;
+  const status=document.getElementById("doe_status"), box=document.getElementById("doe_resultados");
+  if(!data) {{ status.textContent="Informe a data da edição que deseja pesquisar."; return; }}
+  status.textContent="Consultando a publicação oficial do DOE-TCESP..."; box.innerHTML="";
+  try {{
+    const r=await fetch("/api/doe-tcesp/pesquisar?data="+encodeURIComponent(data)+"&palavra_chave="+encodeURIComponent(palavra));
+    const j=await r.json(); if(!r.ok) throw new Error(j.erro||"Não foi possível consultar o DOE.");
+    if(!j.resultados.length) box.innerHTML='<div class="empty"><strong>Nenhuma ocorrência encontrada.</strong>Não foi localizada publicação com os filtros informados nessa edição.</div>';
+    else {{
+      box.innerHTML=j.resultados.map((item,i)=>`<div class="alerta normal" style="margin-top:8px"><strong>${{escapeHtml(item.palavra_chave)}}</strong><div class="muted">Página ${{item.pagina}} · ${{escapeHtml(item.data)}} · ${{escapeHtml(item.url)}}</div><div style="margin-top:6px">${{escapeHtml(item.trecho)}}</div>${{item.processos&&item.processos.length?'<div class="muted" style="margin-top:6px">Processo(s): '+escapeHtml(item.processos.join(", "))+'</div>':''}}<button type="button" class="btn" style="margin-top:9px" onclick="usarDOE(${{i}})">Usar esta publicação</button></div>`).join("");
+      window._doeResultados=j.resultados; status.textContent=`${{j.resultados.length}} ocorrência(s) encontrada(s).`;
+    }}
+  }} catch(e) {{ status.textContent="Erro: "+e.message; }}
+}}
+function usarDOE(i) {{
+  const item=window._doeResultados[i];
+  document.getElementById("doe_data").value=item.data; document.getElementById("doe_edicao").value=item.edicao||"";
+  document.getElementById("doe_secao").value=item.secao||""; document.getElementById("doe_palavra_chave").value=item.palavra_chave||"";
+  document.getElementById("doe_publicacao").value=item.trecho||""; document.getElementById("doe_url").value=item.url||"";
+  if(!document.querySelector('input[name="numero"]').value && item.processos&&item.processos.length) document.querySelector('input[name="numero"]').value=item.processos[0];
+}}
+function escapeHtml(v) {{ return String(v??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}}[c])); }}
+</script>"""
+
 
 
 @app.route("/demandas")
@@ -1116,7 +1278,9 @@ def demandas():
     if (resposta := acesso_login()): return resposta
     busca, origem = request.args.get("busca", "").strip(), request.args.get("origem", "")
     conn = conectar(); sql = "SELECT * FROM demandas WHERE 1=1"; params = []
-    if busca: sql += " AND (numero_processo LIKE ? OR assunto LIKE ? OR area LIKE ? OR responsavel LIKE ?)"; params += [f"%{busca}%"] * 4
+    if busca:
+        sql += " AND (numero_processo LIKE ? OR numero_etc LIKE ? OR assunto LIKE ? OR area LIKE ? OR responsavel LIKE ? OR doe_palavra_chave LIKE ? OR doe_publicacao LIKE ?)"
+        params += [f"%{busca}%"] * 7
     if origem: sql += " AND origem = ?"; params.append(origem)
     registros = conn.execute(sql + " ORDER BY prazo_fatal", params).fetchall(); conn.close()
     linhas = ''
@@ -1304,9 +1468,9 @@ def exportar():
 	if (resposta := acesso_login()): return resposta
 	from openpyxl import Workbook
 	conn = conectar(); dados = conn.execute("SELECT * FROM demandas ORDER BY prazo_fatal").fetchall(); conn.close(); wb = Workbook(); ws = wb.active; ws.title = "Demandas"
-	ws.append(["ID", "Processo", "Origem", "Assunto", "Área", "Responsável", "Prazo área", "Prazo fatal", "Dias entre", "Dias restantes", "Situação", "Prioridade", "Observações"])
+	ws.append(["ID", "Processo", "ETC", "Origem", "Assunto", "Área", "Responsável", "Prazo área", "Prazo fatal", "Dias entre", "Dias restantes", "Situação", "Prioridade", "Observações", "DOE data", "DOE edição", "DOE seção", "DOE palavra-chave", "DOE publicação", "DOE URL"])
 	for d in dados:
-		p = calcular_prazos(d["prazo_area"], d["prazo_fatal"]); ws.append([d["id"], d["numero_processo"], d["origem"], d["assunto"], d["area"], d["responsavel"], data_br(d["prazo_area"]), data_br(d["prazo_fatal"]), p["dias_entre"], p["dias_fatal"], d["situacao"], d["prioridade"], d["observacoes"]])
+		p = calcular_prazos(d["prazo_area"], d["prazo_fatal"]); ws.append([d["id"], d["numero_processo"], d["numero_etc"], d["origem"], d["assunto"], d["area"], d["responsavel"], data_br(d["prazo_area"]), data_br(d["prazo_fatal"]), p["dias_entre"], p["dias_fatal"], d["situacao"], d["prioridade"], d["observacoes"], d["doe_data"], d["doe_edicao"], d["doe_secao"], d["doe_palavra_chave"], d["doe_publicacao"], d["doe_url"]])
 	arquivo = io.BytesIO(); wb.save(arquivo); arquivo.seek(0); return send_file(arquivo, as_attachment=True, download_name="SP_AGUAS_Demandas.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
