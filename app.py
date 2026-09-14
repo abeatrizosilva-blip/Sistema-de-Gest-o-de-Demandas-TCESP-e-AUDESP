@@ -7,6 +7,7 @@ import os
 import socket
 import sqlite3
 import tempfile
+import uuid
 from threading import RLock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -34,41 +35,22 @@ def _env(*nomes, default=""):
 	return default
 
 
-# Credenciais continuam sendo obrigatoriamente configuradas no Vercel.
-# O usuário/pasta/arquivo possuem valores padrão conhecidos do projeto para
-# evitar que uma variável opcional ausente seja confundida com falha de integração.
-_raw_enabled = _env("SHAREPOINT_ENABLED", "ONEDRIVE_ENABLED")
-ONEDRIVE_TENANT_ID = _env("SHAREPOINT_TENANT_ID", "ONEDRIVE_TENANT_ID", "MICROSOFT_TENANT_ID")
-ONEDRIVE_CLIENT_ID = _env("SHAREPOINT_CLIENT_ID", "ONEDRIVE_CLIENT_ID", "MICROSOFT_CLIENT_ID")
-ONEDRIVE_CLIENT_SECRET = _env("SHAREPOINT_CLIENT_SECRET", "ONEDRIVE_CLIENT_SECRET", "MICROSOFT_CLIENT_SECRET")
-ONEDRIVE_USER = _env(
-	"SHAREPOINT_USER", "ONEDRIVE_USER", "MICROSOFT_USER",
-	default="anabeatriz.silva@spaguas.sp.gov.br"
-)
-SHAREPOINT_FOLDER_PATH = _env("SHAREPOINT_FOLDER_PATH", "ONEDRIVE_FOLDER_PATH", default="SP_AGUAS")
-SHAREPOINT_FILE_NAME = _env(
-	"SHAREPOINT_FILE_NAME", "ONEDRIVE_FILE_NAME",
-	default="Sistema de Gestão de Demandas - SP Aguas.xlsx"
-)
-SHAREPOINT_FILE_PATH = _env(
-	"SHAREPOINT_FILE_PATH", "ONEDRIVE_PATH",
-	default=f"{SHAREPOINT_FOLDER_PATH.strip('/')}/{SHAREPOINT_FILE_NAME}"
-)
-ONEDRIVE_PATH = SHAREPOINT_FILE_PATH
+# Integração: Vercel chama um fluxo Power Automate; o fluxo é quem acessa o Excel.
+# Não são necessárias credenciais Microsoft Graph no Vercel.
+POWER_AUTOMATE_URL = _env("POWER_AUTOMATE_URL")
+POWER_AUTOMATE_SECRET = _env("POWER_AUTOMATE_SECRET")
+try:
+	POWER_AUTOMATE_TIMEOUT = int(_env("POWER_AUTOMATE_TIMEOUT", default="90"))
+except ValueError:
+	POWER_AUTOMATE_TIMEOUT = 90
+_raw_pa_enabled = _env("POWER_AUTOMATE_ENABLED")
+POWER_AUTOMATE_ENABLED = (_raw_pa_enabled.lower() in {"1", "true", "sim", "yes", "on"}) if _raw_pa_enabled else bool(POWER_AUTOMATE_URL and POWER_AUTOMATE_SECRET)
 
-# Se a flag não existir, habilita automaticamente quando as três credenciais
-# essenciais estiverem presentes. Se SHAREPOINT_ENABLED=false for informado,
-# a integração permanece explicitamente desabilitada.
-if _raw_enabled:
-	ONEDRIVE_ENABLED = _raw_enabled.lower() in {"1", "true", "sim", "yes", "on"}
-else:
-	ONEDRIVE_ENABLED = bool(ONEDRIVE_TENANT_ID and ONEDRIVE_CLIENT_ID and ONEDRIVE_CLIENT_SECRET)
-SHAREPOINT_ENABLED = ONEDRIVE_ENABLED
-SHAREPOINT_TENANT_ID = ONEDRIVE_TENANT_ID
-SHAREPOINT_CLIENT_ID = ONEDRIVE_CLIENT_ID
-SHAREPOINT_CLIENT_SECRET = ONEDRIVE_CLIENT_SECRET
-SHAREPOINT_SITE_ID = os.environ.get("SHAREPOINT_SITE_ID", "")
-SHAREPOINT_DRIVE_ID = os.environ.get("SHAREPOINT_DRIVE_ID", "")
+# Mantidos somente como metadados do arquivo, sem autenticação no Vercel.
+SHAREPOINT_FOLDER_PATH = _env("SHAREPOINT_FOLDER_PATH", "ONEDRIVE_FOLDER_PATH", default="SP_AGUAS")
+SHAREPOINT_FILE_NAME = _env("SHAREPOINT_FILE_NAME", "ONEDRIVE_FILE_NAME", default="Sistema de Gestão de Demandas - SP Aguas.xlsx")
+SHAREPOINT_FILE_PATH = _env("SHAREPOINT_FILE_PATH", "ONEDRIVE_PATH", default=f"{SHAREPOINT_FOLDER_PATH.strip('/')}/{SHAREPOINT_FILE_NAME}")
+ONEDRIVE_PATH = SHAREPOINT_FILE_PATH
 
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
@@ -78,171 +60,184 @@ TABELAS_EXCEL = {
 
 
 def _diagnostico_configuracao_sharepoint():
-	"""Retorna a situação da configuração sem expor segredos."""
-	usa_site_drive = bool(SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID)
+	"""Compatibilidade: o diagnóstico agora descreve a integração Power Automate."""
+	return _diagnostico_configuracao_power_automate()
+
+
+def _power_automate_configurado():
+	"""Indica se o Vercel está configurado para falar somente com o Power Automate."""
+	return bool(POWER_AUTOMATE_ENABLED and POWER_AUTOMATE_URL)
+
+
+def _diagnostico_configuracao_power_automate():
 	itens = {
-		"SHAREPOINT_ENABLED": {"configurado": bool(SHAREPOINT_ENABLED), "obrigatorio": True, "valor_seguro": "true" if SHAREPOINT_ENABLED else "false"},
-		"SHAREPOINT_TENANT_ID": {"configurado": bool(SHAREPOINT_TENANT_ID), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_TENANT_ID else "ausente"},
-		"SHAREPOINT_CLIENT_ID": {"configurado": bool(SHAREPOINT_CLIENT_ID), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_CLIENT_ID else "ausente"},
-		"SHAREPOINT_CLIENT_SECRET": {"configurado": bool(SHAREPOINT_CLIENT_SECRET), "obrigatorio": True, "valor_seguro": "preenchido" if SHAREPOINT_CLIENT_SECRET else "ausente"},
-		"SHAREPOINT_USER": {"configurado": bool(ONEDRIVE_USER), "obrigatorio": not usa_site_drive, "valor_seguro": ONEDRIVE_USER if ONEDRIVE_USER else "ausente"},
-		"SHAREPOINT_FOLDER_PATH": {"configurado": bool(SHAREPOINT_FOLDER_PATH), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FOLDER_PATH},
-		"SHAREPOINT_FILE_NAME": {"configurado": bool(SHAREPOINT_FILE_NAME), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FILE_NAME},
-		"SHAREPOINT_FILE_PATH": {"configurado": bool(SHAREPOINT_FILE_PATH), "obrigatorio": not usa_site_drive, "valor_seguro": SHAREPOINT_FILE_PATH},
-		"SHAREPOINT_SITE_ID": {"configurado": bool(SHAREPOINT_SITE_ID), "obrigatorio": False, "valor_seguro": "preenchido" if SHAREPOINT_SITE_ID else "não utilizado"},
-		"SHAREPOINT_DRIVE_ID": {"configurado": bool(SHAREPOINT_DRIVE_ID), "obrigatorio": False, "valor_seguro": "preenchido" if SHAREPOINT_DRIVE_ID else "não utilizado"},
+		"POWER_AUTOMATE_ENABLED": {"configurado": bool(POWER_AUTOMATE_ENABLED), "obrigatorio": True, "valor_seguro": "true" if POWER_AUTOMATE_ENABLED else "false"},
+		"POWER_AUTOMATE_URL": {"configurado": bool(POWER_AUTOMATE_URL), "obrigatorio": True, "valor_seguro": "preenchido" if POWER_AUTOMATE_URL else "ausente"},
+		"POWER_AUTOMATE_SECRET": {"configurado": bool(POWER_AUTOMATE_SECRET), "obrigatorio": True, "valor_seguro": "preenchido" if POWER_AUTOMATE_SECRET else "ausente"},
+		"SHAREPOINT_FOLDER_PATH": {"configurado": bool(SHAREPOINT_FOLDER_PATH), "obrigatorio": False, "valor_seguro": SHAREPOINT_FOLDER_PATH},
+		"SHAREPOINT_FILE_NAME": {"configurado": bool(SHAREPOINT_FILE_NAME), "obrigatorio": False, "valor_seguro": SHAREPOINT_FILE_NAME},
 	}
 	faltantes = [nome for nome, item in itens.items() if item["obrigatorio"] and not item["configurado"]]
-	if SHAREPOINT_SITE_ID and not SHAREPOINT_DRIVE_ID:
-		faltantes.append("SHAREPOINT_DRIVE_ID (necessário se SHAREPOINT_SITE_ID for usado)")
-	if SHAREPOINT_DRIVE_ID and not SHAREPOINT_SITE_ID:
-		faltantes.append("SHAREPOINT_SITE_ID (necessário se SHAREPOINT_DRIVE_ID for usado)")
 	return {
-		"habilitada": bool(SHAREPOINT_ENABLED),
-		"usa_site_drive": usa_site_drive,
-		"usa_onedrive_usuario": not usa_site_drive,
-		"itens": itens,
+		"habilitada": bool(POWER_AUTOMATE_ENABLED),
+		"configurada": bool(POWER_AUTOMATE_ENABLED and not faltantes),
 		"faltantes": faltantes,
-		"configurada": bool(SHAREPOINT_ENABLED) and not faltantes,
+		"itens": itens,
+		"modo": "Power Automate → Excel Online (Business) → SharePoint/OneDrive",
 	}
 
 
 def _onedrive_configurado():
-	# Suporta tanto SharePoint (site/drive) quanto OneDrive for Business do usuário.
-	return _diagnostico_configuracao_sharepoint()["configurada"]
+	# Compatibilidade com o restante do código: agora significa Power Automate configurado.
+	return _power_automate_configurado()
 
 
-def _onedrive_token():
-	if not _onedrive_configurado():
-		d = _diagnostico_configuracao_sharepoint()
-		faltantes = ", ".join(d["faltantes"]) or "SHAREPOINT_ENABLED está desabilitado"
-		raise RuntimeError(f"Integração SharePoint não configurada. Variável(is) ausente(s): {faltantes}.")
-	dados = urlencode({
-		"client_id": SHAREPOINT_CLIENT_ID,
-		"client_secret": SHAREPOINT_CLIENT_SECRET,
-		"scope": "https://graph.microsoft.com/.default",
-		"grant_type": "client_credentials",
-	}).encode()
-	url = f"https://login.microsoftonline.com/{quote(SHAREPOINT_TENANT_ID, safe='')}/oauth2/v2.0/token"
+def _normalizar_valor_excel(valor):
+	if isinstance(valor, datetime):
+		return valor.strftime("%Y-%m-%d %H:%M:%S")
+	if isinstance(valor, date):
+		return valor.strftime("%Y-%m-%d")
+	if isinstance(valor, bool):
+		return 1 if valor else 0
+	return valor
+
+
+def _workbook_para_snapshot(conteudo):
+	"""Converte o XLSX em um JSON compacto, sem enviar o arquivo para o Vercel."""
+	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
 	try:
-		with urlopen(Request(url, data=dados, headers={"Content-Type": "application/x-www-form-urlencoded"}), timeout=30) as resposta:
-			payload = json.loads(resposta.read().decode())
-			if not payload.get("access_token"):
-				raise RuntimeError("Microsoft Graph nao retornou access_token.")
-			return payload["access_token"]
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
-		raise RuntimeError(f"Falha na autenticacao Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
-	except (URLError, KeyError, json.JSONDecodeError) as erro:
-		raise RuntimeError(f"Nao foi possivel autenticar no Microsoft Graph: {erro}") from erro
+		resultado = {"usuarios": [], "demandas": [], "historico": []}
+		for tabela, colunas in TABELAS_EXCEL.items():
+			if tabela not in workbook.sheetnames:
+				continue
+			ws = workbook[tabela]
+			linhas = list(ws.iter_rows(values_only=True))
+			if not linhas:
+				continue
+			cabecalho = [str(v).strip() if v is not None else "" for v in linhas[0]]
+			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
+			if len(indices) != len(colunas):
+				raise RuntimeError(f"A aba {tabela} não possui todas as colunas esperadas.")
+			for linha in linhas[1:]:
+				if not any(v is not None for v in linha):
+					continue
+				resultado[tabela].append({nome: _normalizar_valor_excel(linha[indices[nome]]) for nome in colunas})
+		return resultado
+	finally:
+		workbook.close()
 
 
-def _onedrive_path_metadata_url():
-	"""URL de metadados para localizar a pasta/arquivo por caminho no Graph."""
-	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-		caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
-		return (
-			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
-			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}"
-		)
-	if not ONEDRIVE_USER:
-		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório para localizar o arquivo no OneDrive.")
-	usuario = quote(ONEDRIVE_USER, safe="")
-	caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
-	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}"
+def _snapshot_para_xlsx(snapshot):
+	workbook = Workbook()
+	workbook.remove(workbook.active)
+	for tabela, colunas in TABELAS_EXCEL.items():
+		ws = workbook.create_sheet(tabela)
+		ws.append(list(colunas))
+		for celula in ws[1]:
+			celula.font = Font(bold=True)
+		for registro in snapshot.get(tabela, []):
+			ws.append([registro.get(coluna, "") for coluna in colunas])
+		ws.freeze_panes = "A2"
+		ws.auto_filter.ref = ws.dimensions
+		for coluna in ws.columns:
+			largura = min(max(len(str(celula.value or "")) for celula in coluna) + 2, 45)
+			ws.column_dimensions[coluna[0].column_letter].width = largura
+	buffer = io.BytesIO()
+	workbook.save(buffer)
+	workbook.close()
+	return buffer.getvalue()
 
 
-def _onedrive_folder_metadata_url():
-	"""URL de metadados da pasta do projeto no OneDrive."""
-	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-		caminho = quote(SHAREPOINT_FOLDER_PATH.strip("/"), safe="/")
-		return (
-			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
-			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}"
-		)
-	if not ONEDRIVE_USER:
-		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório para localizar a pasta.")
-	usuario = quote(ONEDRIVE_USER, safe="")
-	caminho = quote(SHAREPOINT_FOLDER_PATH.strip("/"), safe="/")
-	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}"
+def _snapshot_do_xlsx(conteudo):
+	return _workbook_para_snapshot(conteudo)
 
 
-def _resolver_arquivo_graph(token):
-	"""Localiza primeiro a pasta e depois o arquivo, retornando seus metadados."""
-	base_headers = {"Authorization": f"Bearer {token}"}
+def _power_automate_request(action, snapshot=None, extra=None):
+	if not _power_automate_configurado():
+		d = _diagnostico_configuracao_power_automate()
+		faltantes = ", ".join(d["faltantes"]) or "POWER_AUTOMATE_ENABLED está desabilitado"
+		raise RuntimeError(f"Integração Power Automate não configurada. Variável(is) ausente(s): {faltantes}.")
+	payload = {
+		"action": action,
+		"requestId": str(uuid.uuid4()),
+		"source": "SP_AGUAS",
+		"timestamp": agora(),
+	}
+	if snapshot is not None:
+		payload["snapshot"] = snapshot
+	if extra:
+		payload.update(extra)
+	headers = {
+		"Content-Type": "application/json",
+		"Accept": "application/json",
+		"X-SP-AGUAS-SECRET": POWER_AUTOMATE_SECRET,
+	}
 	try:
-		with urlopen(Request(_onedrive_folder_metadata_url(), headers=base_headers), timeout=30) as resposta:
-			pasta = json.loads(resposta.read().decode("utf-8"))
+		with urlopen(Request(POWER_AUTOMATE_URL, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST", headers=headers), timeout=POWER_AUTOMATE_TIMEOUT) as resposta:
+			texto = resposta.read().decode("utf-8", errors="replace")
+			if not texto:
+				return {"status": "OK"}
+			resultado = json.loads(texto)
+			if isinstance(resultado, dict) and resultado.get("status") in {"ERRO", "ERROR"}:
+				if int(resultado.get("httpStatus") or resultado.get("statusCode") or 0) in (409, 412):
+					raise ConcurrentUpdateError(resultado.get("mensagem") or "O Excel foi alterado durante a operação.")
+				raise RuntimeError(resultado.get("mensagem") or resultado.get("error") or "Power Automate retornou erro.")
+			return resultado if isinstance(resultado, dict) else {"status": "OK", "result": resultado}
 	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
-		if erro.code == 404:
-			raise RuntimeError(
-				f"Pasta '{SHAREPOINT_FOLDER_PATH}' não foi localizada no OneDrive de '{ONEDRIVE_USER}'."
-			) from erro
-		if erro.code in (401, 403):
-			raise RuntimeError(
-				f"Microsoft Graph recusou o acesso à pasta '{SHAREPOINT_FOLDER_PATH}' (HTTP {erro.code}). "
-				"Verifique Files.ReadWrite.All e o consentimento administrativo."
-			) from erro
-		raise RuntimeError(f"Falha ao localizar a pasta no Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
-
-	pasta_id = pasta.get("id")
-	if not pasta_id:
-		raise RuntimeError(f"O Graph localizou a pasta '{SHAREPOINT_FOLDER_PATH}', mas não retornou o ID dela.")
-
-	# O endpoint por caminho abaixo resolve o arquivo dentro da pasta encontrada.
-	try:
-		with urlopen(Request(_onedrive_path_metadata_url(), headers=base_headers), timeout=30) as resposta:
-			arquivo = json.loads(resposta.read().decode("utf-8"))
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1000]
-		if erro.code == 404:
-			raise RuntimeError(
-				f"Arquivo '{SHAREPOINT_FILE_NAME}' não foi localizado dentro da pasta "
-				f"'{SHAREPOINT_FOLDER_PATH}'."
-			) from erro
-		if erro.code in (401, 403):
-			raise RuntimeError(
-				f"Microsoft Graph recusou o acesso ao arquivo '{SHAREPOINT_FILE_NAME}' (HTTP {erro.code})."
-			) from erro
-		raise RuntimeError(f"Falha ao localizar o arquivo no Microsoft Graph (HTTP {erro.code}): {detalhe}") from erro
-
-	arquivo_id = arquivo.get("id")
-	if not arquivo_id:
-		raise RuntimeError(f"O Graph localizou '{SHAREPOINT_FILE_NAME}', mas não retornou o ID do arquivo.")
-	return pasta, arquivo
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1800]
+		raise RuntimeError(f"Power Automate retornou HTTP {erro.code}: {detalhe}") from erro
+	except (URLError, TimeoutError, json.JSONDecodeError) as erro:
+		raise RuntimeError(f"Não foi possível acessar o fluxo do Power Automate: {erro}") from erro
 
 
-def _onedrive_url():
-	"""Retorna a URL de conteúdo do arquivo, resolvendo pasta e arquivo pelo Graph."""
-	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-		caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
-		return (
-			f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}"
-			f"/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
-		)
-	token = _onedrive_token()
-	_, arquivo = _resolver_arquivo_graph(token)
-	usuario = quote(ONEDRIVE_USER, safe="")
-	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/{quote(arquivo['id'], safe='')}/content"
+def _pa_snapshot_remoto():
+	resposta = _power_automate_request("GET_SNAPSHOT")
+	snapshot = resposta.get("snapshot") or resposta.get("data") or resposta.get("result")
+	if isinstance(snapshot, str):
+		try:
+			snapshot = json.loads(snapshot)
+		except json.JSONDecodeError as erro:
+			raise RuntimeError("O Power Automate retornou um snapshot inválido.") from erro
+	if not isinstance(snapshot, dict):
+		raise RuntimeError("O Power Automate não retornou o snapshot do Excel.")
+	return snapshot, resposta.get("version") or resposta.get("etag") or resposta.get("lastModified") or "power-automate"
+
+
+def _graph_metadata_diagnostico():
+	_, versao = _pa_snapshot_remoto()
+	return {"eTag": str(versao), "version": str(versao), "name": SHAREPOINT_FILE_NAME, "source": "Power Automate"}
+
+
+def _graph_download_diagnostico():
+	snapshot, _ = _pa_snapshot_remoto()
+	return _snapshot_para_xlsx(snapshot)
+
+
+def _graph_upload_diagnostico(conteudo, etag=None):
+	snapshot = _snapshot_do_xlsx(conteudo)
+	resposta = _power_automate_request("REPLACE_SNAPSHOT", snapshot=snapshot, extra={"expectedVersion": etag or ""})
+	status = resposta.get("httpStatus") or resposta.get("statusCode") or 200
+	if isinstance(status, str) and status.isdigit():
+		status = int(status)
+	if status in (409, 412):
+		raise ConcurrentUpdateError("O Excel foi alterado durante a operação pelo Power Automate.")
+	if status not in (200, 201):
+		raise RuntimeError(f"Power Automate não confirmou a gravação (status {status}).")
+	return int(status)
+
+
+def _graph_snapshot():
+	meta = _graph_metadata_diagnostico()
+	conteudo = _graph_download_diagnostico()
+	if not conteudo:
+		raise RuntimeError("O Power Automate retornou o Excel vazio.")
+	return meta, conteudo
 
 
 def obter_planilha():
-	"""Baixa a planilha remota para um arquivo temporario e retorna seu caminho."""
-	if not _onedrive_configurado():
+	if not _power_automate_configurado():
 		return None
-	try:
-		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=60) as resposta:
-			conteudo = resposta.read()
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1500]
-		if erro.code == 404:
-			raise RuntimeError(f"Arquivo nao encontrado no SharePoint. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'. Resposta Graph: {detalhe}") from erro
-		if erro.code in (401, 403):
-			raise RuntimeError("Microsoft Graph recusou o acesso. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
-		raise RuntimeError(f"Nao foi possivel baixar a planilha do SharePoint (HTTP {erro.code}): {detalhe}") from erro
-	except URLError as erro:
-		raise RuntimeError(f"Nao foi possivel acessar o SharePoint: {erro}") from erro
+	conteudo = _graph_download_diagnostico()
 	with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as temporario:
 		temporario.write(conteudo)
 		return temporario.name
@@ -262,58 +257,32 @@ def _baixar_planilha_one_drive():
 
 
 def salvar_planilha():
-	"""Impedida de fazer PUT cego; toda escrita deve usar eTag/If-Match."""
-	raise RuntimeError("Gravação direta desabilitada. Use executar_mutacao_atomica().")
+	raise RuntimeError("Gravação direta desabilitada. Use o fluxo do Power Automate.")
 
 
 def _enviar_planilha_one_drive():
 	return salvar_planilha()
 
 
-def _graph_metadata_diagnostico():
-	"""Obtém os metadados do arquivo remoto no SharePoint/OneDrive."""
-	token = _onedrive_token()
-	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-		url = _onedrive_path_metadata_url()
-		with urlopen(Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=30) as resposta:
-			return json.loads(resposta.read().decode("utf-8"))
-	_, arquivo = _resolver_arquivo_graph(token)
-	return arquivo
+def _onedrive_token():
+	# Compatibilidade com funções legadas; nenhum token Microsoft é usado pelo Vercel.
+	return "POWER_AUTOMATE"
 
 
-def _graph_download_diagnostico():
-	"""Baixa o arquivo remoto como bytes."""
-	token = _onedrive_token()
-	requisicao = Request(_onedrive_url(), headers={"Authorization": f"Bearer {token}"})
-	with urlopen(requisicao, timeout=60) as resposta:
-		return resposta.read()
+def _onedrive_url():
+	return POWER_AUTOMATE_URL
 
 
-def _graph_upload_diagnostico(conteudo, etag=None):
-	"""PUT condicional no arquivo remoto; If-Match impede sobrescrita de versão concorrente."""
-	token = _onedrive_token()
-	headers = {
-		"Authorization": f"Bearer {token}",
-		"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-	}
-	if etag:
-		headers["If-Match"] = etag
-	requisicao = Request(_onedrive_url(), data=conteudo, method="PUT", headers=headers)
-	try:
-		with urlopen(requisicao, timeout=120) as resposta:
-			return resposta.status
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1200]
-		if erro.code == 412:
-			raise ConcurrentUpdateError("O arquivo do SharePoint foi alterado por outra instância durante a gravação.") from erro
-		if erro.code in (401, 403):
-			raise RuntimeError("Microsoft Graph recusou a gravação. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
-		if erro.code == 404:
-			raise RuntimeError(
-				f"Arquivo '{SHAREPOINT_FILE_NAME}' não localizado para gravação dentro de "
-				f"'{SHAREPOINT_FOLDER_PATH}'."
-			) from erro
-		raise RuntimeError(f"Falha SharePoint HTTP {erro.code}: {detalhe}") from erro
+def _onedrive_path_metadata_url():
+	return POWER_AUTOMATE_URL
+
+
+def _onedrive_folder_metadata_url():
+	return POWER_AUTOMATE_URL
+
+
+def _resolver_arquivo_graph(token=None):
+	return {"name": SHAREPOINT_FOLDER_PATH}, {"name": SHAREPOINT_FILE_NAME, "id": "power-automate"}
 
 
 class ConcurrentUpdateError(RuntimeError):
@@ -377,72 +346,21 @@ def _confirmar_demanda_no_xlsx(conteudo, demanda_id):
 
 
 def salvar_demanda_atomicamente(valores, usuario_id, tentativas=3):
-	"""
-	Fluxo atômico/otimista para Vercel + Excel no SharePoint:
-	1) lê a versão atual; 2) altera os dados; 3) gera XLSX;
-	4) PUT com If-Match/eTag; 5) baixa novamente; 6) confirma a demanda.
-	Se outra instância alterar o arquivo, o PUT retorna 412 e o processo
-	recomeça sobre a versão mais nova, evitando lost update.
-	"""
-	if not _onedrive_configurado():
-		raise RuntimeError("Integração SharePoint não está configurada.")
-
-	for tentativa in range(1, tentativas + 1):
-		with ARQUIVO_LOCK:
-			meta, remoto_antes = _graph_snapshot()
-			etag = meta["eTag"]
-			# Reconstrói a conexão em memória a partir da versão que acabamos de ler.
-			conn = conectar()
-			conn._conn.rollback()
-			for tabela in reversed(tuple(TABELAS_EXCEL.keys())):
-				conn._conn.execute(f"DELETE FROM {tabela}")
-			_carregar_xlsx_bytes_na_conexao(conn, remoto_antes)
-
-			agora_valor = agora()
-			cur = conn._conn.execute(
-				"INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				(*valores, usuario_id, agora_valor, agora_valor),
-			)
-			demanda_id = cur.lastrowid
-			historico_id = conn._conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM historico").fetchone()[0]
-			historico = {"id": historico_id, "demanda_id": demanda_id, "usuario_id": usuario_id, "acao": "CRIACAO", "descricao": "Demanda cadastrada.", "data_hora": agora_valor}
-			conn._conn.execute(
-				"INSERT INTO historico (id, demanda_id, usuario_id, acao, descricao, data_hora) VALUES (?, ?, ?, ?, ?, ?)",
-				tuple(historico[c] for c in TABELAS_EXCEL["historico"]),
-			)
-			conn._conn.commit()
-
-			demanda = {c: conn._conn.execute(f"SELECT {c} FROM demandas WHERE id = ?", (demanda_id,)).fetchone()[0] for c in TABELAS_EXCEL["demandas"]}
-			novo_xlsx = _gerar_xlsx_com_demanda(remoto_antes, demanda, historico)
-			hash_enviado = hashlib.sha256(novo_xlsx).hexdigest()
-
-			try:
-				status_put = _graph_upload_diagnostico(novo_xlsx, etag=etag)
-			except ConcurrentUpdateError:
-				if tentativa == tentativas:
-					raise RuntimeError("Não foi possível gravar porque o Excel foi alterado por outra instância. Tente novamente.")
-				continue
-			if status_put not in (200, 201):
-				raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
-
-			# Confirmação pós-PUT: lê exatamente o que ficou no SharePoint.
-			remoto_depois = _graph_download_diagnostico()
-			hash_remoto = hashlib.sha256(remoto_depois).hexdigest()
-			if hash_remoto != hash_enviado:
-				raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado.")
-			if not _confirmar_demanda_no_xlsx(remoto_depois, demanda_id):
-				raise RuntimeError("A demanda não foi encontrada no arquivo remoto após a gravação.")
-
-			return {
-				"status": "OK",
-				"demanda_id": demanda_id,
-				"tentativa": tentativa,
-				"etag_antes": etag,
-				"sha256": hash_remoto,
-				"mensagem": "Demanda cadastrada e confirmada no SharePoint."
-			}
-
-	raise RuntimeError("Falha de concorrência ao gravar a demanda.")
+	"""Cadastra uma demanda usando o Power Automate como camada de persistência."""
+	def mutator(workbook):
+		planilha = workbook["demandas"]
+		cabecalho = _cabecalho_planilha(planilha)
+		demanda_id = _proximo_id(planilha, cabecalho)
+		agora_valor = agora()
+		registro = dict(zip(TABELAS_EXCEL["demandas"], (demanda_id, *valores, usuario_id, agora_valor, agora_valor)))
+		_append_registro(planilha, TABELAS_EXCEL["demandas"], registro)
+		ph = workbook["historico"]
+		hid = _proximo_id(ph, _cabecalho_planilha(ph))
+		historico = {"id": hid, "demanda_id": demanda_id, "usuario_id": usuario_id, "acao": "CRIACAO", "descricao": "Demanda cadastrada.", "data_hora": agora_valor}
+		_append_registro(ph, TABELAS_EXCEL["historico"], historico)
+		return {"demanda_id": demanda_id, "historico_id": hid}
+	resultado = executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "demandas", r["demanda_id"]) and _confirmar_id_na_aba(conteudo, "historico", r["historico_id"]), tentativas=tentativas)
+	return {"status": "OK", **resultado, "mensagem": "Demanda cadastrada e confirmada pelo Power Automate."}
 
 
 def _carregar_xlsx_bytes_na_conexao(conn, conteudo):
@@ -768,19 +686,21 @@ def _atualizar_conexao_com_snapshot(conteudo):
 
 
 def executar_mutacao_atomica(mutator, confirmador=None, tentativas=3):
-	"""Executa qualquer escrita do sistema contra a versão atual do Excel.
+	"""Executa a mutação localmente sobre um snapshot e devolve o XLSX ao Power Automate.
 
-	Cada tentativa lê o XLSX + eTag, aplica a mutação, envia com If-Match,
-	e só atualiza o banco em memória depois de confirmar o conteúdo remoto.
-	Em conflito 412, relê a versão nova e repete a operação.
+	O Vercel nunca autentica no Microsoft Graph e nunca envia o arquivo diretamente ao
+	SharePoint. O fluxo Power Automate recebe o snapshot e grava o Excel por meio do
+	Excel Online (Business)/Office Scripts.
 	"""
-	if not _onedrive_configurado():
-		raise RuntimeError("Integração SharePoint não está configurada.")
+	if not _power_automate_configurado():
+		d = _diagnostico_configuracao_power_automate()
+		faltantes = ", ".join(d["faltantes"]) or "POWER_AUTOMATE_ENABLED está desabilitado"
+		raise RuntimeError(f"Integração Power Automate não configurada. Faltantes: {faltantes}.")
 	ultimo_conflito = None
 	for tentativa in range(1, tentativas + 1):
 		with ARQUIVO_LOCK:
 			meta, remoto_antes = _graph_snapshot()
-			etag = meta["eTag"]
+			versao = meta.get("eTag")
 			workbook = load_workbook(io.BytesIO(remoto_antes))
 			try:
 				resultado = mutator(workbook)
@@ -788,22 +708,22 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=3):
 			finally:
 				workbook.close()
 			try:
-				status_put = _graph_upload_diagnostico(novo_xlsx, etag=etag)
+				status_put = _graph_upload_diagnostico(novo_xlsx, etag=versao)
 			except ConcurrentUpdateError as erro:
 				ultimo_conflito = erro
 				continue
 			if status_put not in (200, 201):
-				raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
+				raise RuntimeError(f"Power Automate retornou status {status_put}.")
 			remoto_depois = _graph_download_diagnostico()
 			if hashlib.sha256(remoto_depois).hexdigest() != hashlib.sha256(novo_xlsx).hexdigest():
-				raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado; a operação não foi confirmada.")
+				raise RuntimeError("O Excel confirmado pelo Power Automate ficou diferente do conteúdo enviado.")
 			if confirmador is not None and not confirmador(remoto_depois, resultado):
-				raise RuntimeError("A operação foi enviada, mas não pôde ser confirmada no arquivo remoto.")
+				raise RuntimeError("A operação foi enviada, mas não pôde ser confirmada no Excel remoto.")
 			_atualizar_conexao_com_snapshot(remoto_depois)
-			return resultado
+			return {"status": "OK", **(resultado if isinstance(resultado, dict) else {"resultado": resultado}), "tentativa": tentativa}
 	if ultimo_conflito:
-		raise RuntimeError("O Excel foi alterado simultaneamente por outra instância. Tente novamente.") from ultimo_conflito
-	raise RuntimeError("Não foi possível concluir a gravação no SharePoint.")
+		raise RuntimeError("O Excel foi alterado simultaneamente. Tente novamente.") from ultimo_conflito
+	raise RuntimeError("Não foi possível concluir a gravação pelo Power Automate.")
 
 
 def _append_registro(planilha, colunas, registro):
@@ -1393,125 +1313,59 @@ def exportar():
 @app.route("/status")
 def status():
 	if (resposta := acesso_login()): return resposta
-	resultado = {"status": "OK", "sharepoint_configurado": _onedrive_configurado(), "planilha_local": PLANILHA, "vercel": bool(os.environ.get("VERCEL"))}
-	if not _onedrive_configurado():
-		diagnostico = _diagnostico_configuracao_sharepoint()
-		resultado.update(
-			status="ERRO",
-			erro=f"Integração Microsoft Graph não configurada. Faltantes: {', '.join(diagnostico['faltantes']) or 'SHAREPOINT_ENABLED está desabilitado'}.",
-			configuracao=diagnostico,
-		)
+	config = _diagnostico_configuracao_power_automate()
+	resultado = {"status": "OK", "power_automate_configurado": config["configurada"], "planilha_local": PLANILHA, "vercel": bool(os.environ.get("VERCEL")), "arquivo": SHAREPOINT_FILE_PATH}
+	if not config["configurada"]:
+		resultado.update(status="ERRO", erro=f"Integração Power Automate não configurada. Faltantes: {', '.join(config['faltantes']) or 'POWER_AUTOMATE_ENABLED está desabilitado'}", configuracao=config)
 		return jsonify(resultado), 500
 	try:
-		with urlopen(Request(_onedrive_url(), headers={"Authorization": f"Bearer {_onedrive_token()}"}), timeout=30) as resposta:
-			conteudo = resposta.read()
-		resultado.update(token_graph=True, arquivo_sharepoint_acessivel=True, tamanho_bytes=len(conteudo), mensagem="CONEXÃO COM SHAREPOINT OK")
+		snapshot, versao = _pa_snapshot_remoto()
+		resultado.update(power_automate=True, excel_acessivel=True, versao=str(versao), tabelas={k: len(v) for k, v in snapshot.items()}, mensagem="CONEXÃO POWER AUTOMATE + EXCEL OK")
 		return jsonify(resultado), 200
 	except Exception as erro:
-		resultado.update(status="ERRO", token_graph=False, arquivo_sharepoint_acessivel=False, erro=str(erro))
+		resultado.update(status="ERRO", power_automate=False, excel_acessivel=False, erro=str(erro))
 		return jsonify(resultado), 500
 
 
 @app.route("/teste-integracao")
 def teste_integracao():
-	"""Teste somente leitura da configuração, autenticação Graph e Excel remoto."""
+	"""Diagnóstico somente leitura da integração Vercel → Power Automate → Excel."""
 	if not usuario_logado():
 		return jsonify({"status": "ERRO", "mensagem": "Usuário não autenticado."}), 401
 	if not administrador():
 		return jsonify({"status": "ERRO", "mensagem": "Somente administradores podem executar o teste."}), 403
-
-	config = _diagnostico_configuracao_sharepoint()
+	config = _diagnostico_configuracao_power_automate()
 	resultado = {
-		"teste": "Integração SP ÁGUAS + Microsoft Graph + OneDrive/SharePoint",
+		"teste": "Integração SP ÁGUAS + Power Automate + Excel Online (Business)",
 		"status_final": "INICIANDO",
 		"pasta": SHAREPOINT_FOLDER_PATH,
 		"arquivo": SHAREPOINT_FILE_NAME,
 		"caminho_completo": SHAREPOINT_FILE_PATH,
-		"endpoint_graph": _onedrive_path_metadata_url() if config["configurada"] else None,
+		"endpoint_power_automate": POWER_AUTOMATE_URL if config["configurada"] else None,
 		"observacao": "Este teste é somente leitura e não altera o Excel.",
 		"etapas": [],
 	}
-
-	def etapa(numero, nome, status, mensagem, **dados):
-		item = {"numero": numero, "etapa": nome, "status": status, "mensagem": mensagem}
-		item.update(dados)
-		resultado["etapas"].append(item)
-
-	etapa(1, "Configuração", "OK" if config["configurada"] else "ERRO",
-		"Todas as variáveis obrigatórias estão preenchidas." if config["configurada"] else "A configuração está incompleta.",
-		habilitada=config["habilitada"], faltantes=config["faltantes"],
-		modo="Site/Drive" if config["usa_site_drive"] else "OneDrive do usuário",
-		variaveis={k: v["valor_seguro"] for k, v in config["itens"].items()})
-
+	def etapa(numero, nome, status_nome, mensagem, **dados):
+		item = {"numero": numero, "etapa": nome, "status": status_nome, "mensagem": mensagem}; item.update(dados); resultado["etapas"].append(item)
+	etapa(1, "Configuração Power Automate", "OK" if config["configurada"] else "ERRO",
+		"URL e segredo do fluxo estão configurados." if config["configurada"] else "A configuração está incompleta.",
+		habilitada=config["habilitada"], faltantes=config["faltantes"], variaveis={k: v["valor_seguro"] for k, v in config["itens"].items()})
 	if not config["configurada"]:
 		resultado["status_final"] = "FALHA_CONFIGURACAO"
-		resultado["mensagem_final"] = "Corrija as variáveis indicadas na etapa 1 no Vercel e faça um novo Deploy."
+		resultado["mensagem_final"] = "Preencha POWER_AUTOMATE_URL, POWER_AUTOMATE_SECRET e POWER_AUTOMATE_ENABLED no Vercel e faça novo Deploy."
 		return jsonify(resultado), 500
-
 	try:
-		token = _onedrive_token()
-		etapa(2, "Autenticação Microsoft Graph", "OK", "Token de aplicação obtido com sucesso. O segredo não é exibido.")
+		snapshot, versao = _pa_snapshot_remoto()
+		etapa(2, "Power Automate", "OK", "O fluxo respondeu ao pedido de leitura.", versao=str(versao))
+		etapa(3, "Excel no SharePoint/OneDrive", "OK", "O fluxo devolveu o snapshot do arquivo.", tabelas={k: len(v) for k, v in snapshot.items()})
+		resultado["status_final"] = "SUCESSO"
+		resultado["mensagem_final"] = "Vercel → Power Automate → Excel está funcionando."
+		return jsonify(resultado), 200
 	except Exception as erro:
-		etapa(2, "Autenticação Microsoft Graph", "ERRO", str(erro))
-		resultado["status_final"] = "FALHA_AUTENTICACAO"
-		resultado["mensagem_final"] = "Verifique TENANT_ID, CLIENT_ID, CLIENT_SECRET e o consentimento administrativo das permissões Graph."
+		etapa(2, "Power Automate", "ERRO", str(erro))
+		resultado["status_final"] = "FALHA_POWER_AUTOMATE"
+		resultado["mensagem_final"] = "Verifique o fluxo, a conexão do Excel Online (Business), o segredo e as permissões do arquivo."
 		return jsonify(resultado), 500
-
-	try:
-		pasta, meta_arquivo = _resolver_arquivo_graph(token)
-		etapa(
-			3, "Localização da pasta e do arquivo", "OK",
-			"O Graph localizou a pasta e o arquivo pelo caminho informado.",
-			pasta_id=pasta.get("id"),
-			arquivo_id=meta_arquivo.get("id"),
-			nome_arquivo=meta_arquivo.get("name"),
-			caminho_graph=meta_arquivo.get("parentReference", {}).get("path"),
-		)
-		usuario = quote(ONEDRIVE_USER, safe="")
-		content_url = (
-			f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/"
-			f"{quote(meta_arquivo['id'], safe='')}/content"
-			if not (SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID)
-			else _onedrive_url()
-		)
-		with urlopen(Request(content_url, headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
-			arquivo = resposta.read()
-			status_http = resposta.status
-		etapa(4, "Download e validação do Excel", "OK", "O arquivo remoto foi localizado e baixado.",
-			status_http=status_http, tamanho_bytes=len(arquivo),
-			sha256=hashlib.sha256(arquivo).hexdigest())
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1200]
-		etapa(3, "Localização da pasta e do arquivo", "ERRO", f"Graph retornou HTTP {erro.code}: {detalhe}")
-		resultado["status_final"] = "FALHA_ACESSO_GRAPH"
-		resultado["mensagem_final"] = "Verifique credenciais/permissões e o nome exato da pasta e do arquivo."
-		return jsonify(resultado), 500
-	except Exception as erro:
-		etapa(3, "Localização da pasta e do arquivo", "ERRO", str(erro))
-		resultado["status_final"] = "FALHA_ACESSO_GRAPH"
-		resultado["mensagem_final"] = "Verifique se a pasta SP_AGUAS e o arquivo Excel existem no OneDrive corporativo."
-		return jsonify(resultado), 500
-
-	try:
-		workbook = load_workbook(io.BytesIO(arquivo), read_only=True, data_only=True)
-		abas = workbook.sheetnames
-		workbook.close()
-		exigidas = ["usuarios", "demandas", "historico"]
-		faltantes_abas = [aba for aba in exigidas if aba not in abas]
-		if faltantes_abas:
-			etapa(5, "Validação do Excel", "ERRO", "O arquivo foi acessado, mas faltam abas obrigatórias.", abas=abas, faltantes=faltantes_abas)
-			resultado["status_final"] = "FALHA_ESTRUTURA_EXCEL"
-			return jsonify(resultado), 500
-		etapa(5, "Validação do Excel", "OK", "XLSX válido e abas obrigatórias encontradas.", abas=abas)
-	except Exception as erro:
-		etapa(5, "Validação do Excel", "ERRO", str(erro))
-		resultado["status_final"] = "FALHA_VALIDACAO_EXCEL"
-		return jsonify(resultado), 500
-
-	resultado["status_final"] = "OK"
-	resultado["mensagem_final"] = "CONEXÃO MICROSOFT GRAPH + PASTA + ARQUIVO EXCEL OK. O teste foi concluído sem alterar o arquivo remoto."
-	return jsonify(resultado), 200
-
 
 @app.route("/health")
 def health():
@@ -1520,92 +1374,53 @@ def health():
 
 @app.route("/diagnostico-sync")
 def diagnostico_sync():
-    """Diagnóstico somente leitura da cadeia aplicação -> XLSX remoto.
-
-    Esta rota nunca reconstrói nem envia o workbook ao SharePoint/OneDrive.
-    """
-    if (resposta := acesso_login()):
-        return resposta
-    if not administrador():
-        return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
-
-    inicio = datetime.now()
-    config = _diagnostico_configuracao_sharepoint()
-    resultado = {
-        "status": "INICIANDO",
-        "somente_leitura": True,
-        "arquivo_configurado": SHAREPOINT_FILE_PATH,
-        "etapas": [],
-    }
-
-    def etapa(numero, nome, status, mensagem, **dados):
-        item = {"numero": numero, "etapa": nome, "status": status, "mensagem": mensagem}
-        item.update(dados)
-        resultado["etapas"].append(item)
-
-    if not config["configurada"]:
-        etapa(1, "Configuração", "ERRO", "Integração Microsoft Graph desabilitada ou incompleta.", faltantes=config["faltantes"])
-        resultado.update(status="FALHA_CONFIGURACAO", mensagem_final="Preencha as variáveis do Microsoft Graph no Vercel e faça um novo Deploy.")
-        return jsonify(resultado), 500
-    etapa(1, "Configuração", "OK", "Configuração do Microsoft Graph está preenchida.", caminho=SHAREPOINT_FILE_PATH)
-
-    try:
-        token = _onedrive_token()
-        etapa(2, "Autenticação Microsoft Graph", "OK", "Access token obtido. O segredo não é exibido.")
-    except Exception as erro:
-        etapa(2, "Autenticação Microsoft Graph", "ERRO", str(erro))
-        resultado.update(status="FALHA_AUTENTICACAO", mensagem_final="Verifique credenciais, permissões Graph e consentimento administrativo.")
-        return jsonify(resultado), 500
-
-    try:
-        pasta, arquivo = _resolver_arquivo_graph(token)
-        etapa(3, "Localização", "OK", "Pasta e arquivo localizados pelo caminho configurado.", pasta_id=pasta.get("id"), arquivo_id=arquivo.get("id"), nome=arquivo.get("name"))
-    except Exception as erro:
-        etapa(3, "Localização", "ERRO", str(erro))
-        resultado.update(status="FALHA_LOCALIZACAO", mensagem_final="Verifique a pasta SP_AGUAS e o nome exato do arquivo no OneDrive corporativo.")
-        return jsonify(resultado), 500
-
-    try:
-        usuario = quote(ONEDRIVE_USER, safe="")
-        if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
-            url_conteudo = _onedrive_url()
-        else:
-            url_conteudo = f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/{quote(arquivo['id'], safe='')}/content"
-        with urlopen(Request(url_conteudo, headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
-            conteudo = resposta.read()
-            status_http = resposta.status
-        etapa(4, "Download", "OK", "Arquivo remoto baixado sem qualquer alteração.", status_http=status_http, tamanho_bytes=len(conteudo), sha256=hashlib.sha256(conteudo).hexdigest())
-    except Exception as erro:
-        etapa(4, "Download", "ERRO", str(erro))
-        resultado.update(status="FALHA_DOWNLOAD", mensagem_final="O Graph encontrou o arquivo, mas não conseguiu baixá-lo.")
-        return jsonify(resultado), 500
-
-    try:
-        workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
-        abas = list(workbook.sheetnames)
-        contagens = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
-        workbook.close()
-        faltantes = [aba for aba in TABELAS_EXCEL if aba not in abas]
-        if faltantes:
-            raise RuntimeError("Faltam as abas obrigatórias: " + ", ".join(faltantes))
-        etapa(5, "Estrutura do Excel", "OK", "XLSX válido e abas obrigatórias encontradas.", abas=abas, contagens_remotas=contagens)
-    except Exception as erro:
-        etapa(5, "Estrutura do Excel", "ERRO", str(erro))
-        resultado.update(status="FALHA_ESTRUTURA_EXCEL", mensagem_final="O arquivo remoto não possui a estrutura esperada pelo sistema.")
-        return jsonify(resultado), 500
-
-    try:
-        conn = conectar()
-        contagens_locais = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-        conn.close()
-        etapa(6, "Dados carregados", "OK", "Dados da aplicação disponíveis em memória.", contagens_locais=contagens_locais, contagens_remotas=contagens)
-    except Exception as erro:
-        etapa(6, "Dados carregados", "ERRO", str(erro))
-        resultado.update(status="FALHA_DADOS", mensagem_final="Não foi possível validar os dados carregados pela aplicação.")
-        return jsonify(resultado), 500
-
-    resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="Diagnóstico concluído em modo somente leitura. Nenhum upload ou alteração foi executado.")
-    return jsonify(resultado), 200
+	"""Diagnóstico somente leitura da cadeia Vercel → Power Automate → Excel."""
+	if (resposta := acesso_login()):
+		return resposta
+	if not administrador():
+		return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
+	inicio = datetime.now()
+	config = _diagnostico_configuracao_power_automate()
+	resultado = {"status": "INICIANDO", "somente_leitura": True, "arquivo_configurado": SHAREPOINT_FILE_PATH, "etapas": []}
+	def etapa(numero, nome, status_nome, mensagem, **dados):
+		item = {"numero": numero, "etapa": nome, "status": status_nome, "mensagem": mensagem}; item.update(dados); resultado["etapas"].append(item)
+	if not config["configurada"]:
+		etapa(1, "Configuração Power Automate", "ERRO", "Integração Power Automate incompleta.", faltantes=config["faltantes"])
+		resultado.update(status="FALHA_CONFIGURACAO", mensagem_final="Preencha POWER_AUTOMATE_URL, POWER_AUTOMATE_SECRET e POWER_AUTOMATE_ENABLED no Vercel.")
+		return jsonify(resultado), 500
+	etapa(1, "Configuração Power Automate", "OK", "Fluxo configurado.", modo=config["modo"])
+	try:
+		snapshot, versao = _pa_snapshot_remoto()
+		etapa(2, "Comunicação com o fluxo", "OK", "O Power Automate respondeu ao pedido GET_SNAPSHOT.", versao=str(versao))
+	except Exception as erro:
+		etapa(2, "Comunicação com o fluxo", "ERRO", str(erro))
+		resultado.update(status="FALHA_POWER_AUTOMATE", mensagem_final="Verifique a URL, o segredo e o fluxo no Power Automate.")
+		return jsonify(resultado), 500
+	try:
+		conteudo = _snapshot_para_xlsx(snapshot)
+		workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+		abas = list(workbook.sheetnames)
+		contagens = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
+		workbook.close()
+		faltantes = [aba for aba in TABELAS_EXCEL if aba not in abas]
+		if faltantes:
+			raise RuntimeError("Faltam as abas obrigatórias: " + ", ".join(faltantes))
+		etapa(3, "Estrutura do Excel", "OK", "Snapshot válido e abas obrigatórias encontradas.", abas=abas, contagens_remotas=contagens)
+	except Exception as erro:
+		etapa(3, "Estrutura do Excel", "ERRO", str(erro))
+		resultado.update(status="FALHA_ESTRUTURA_EXCEL", mensagem_final="Verifique a estrutura das abas usuarios, demandas e historico.")
+		return jsonify(resultado), 500
+	try:
+		conn = conectar()
+		contagens_locais = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+		conn.close()
+		etapa(4, "Dados carregados", "OK", "Dados da aplicação disponíveis em memória.", contagens_locais=contagens_locais, contagens_remotas=contagens)
+	except Exception as erro:
+		etapa(4, "Dados carregados", "ERRO", str(erro))
+		resultado.update(status="FALHA_DADOS", mensagem_final="Não foi possível validar os dados carregados pela aplicação.")
+		return jsonify(resultado), 500
+	resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="Diagnóstico concluído em modo somente leitura. Nenhuma alteração foi executada.")
+	return jsonify(resultado), 200
 
 
 @app.route("/logout")
