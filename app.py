@@ -50,12 +50,13 @@ TABELAS_EXCEL = {
 
 
 def _onedrive_configurado():
-	return SHAREPOINT_ENABLED and all((SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_SITE_ID, SHAREPOINT_DRIVE_ID, SHAREPOINT_FILE_PATH))
+	# Suporta tanto SharePoint (site/drive) quanto OneDrive for Business do usuário.
+	return SHAREPOINT_ENABLED and all((SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_FILE_PATH))
 
 
 def _onedrive_token():
 	if not _onedrive_configurado():
-		raise RuntimeError("SharePoint não configurado. Defina SHAREPOINT_ENABLED, SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_SITE_ID, SHAREPOINT_DRIVE_ID e SHAREPOINT_FILE_PATH.")
+		raise RuntimeError("SharePoint não configurado. Defina SHAREPOINT_ENABLED, SHAREPOINT_TENANT_ID, SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_USER e SHAREPOINT_FILE_PATH.")
 	dados = urlencode({
 		"client_id": SHAREPOINT_CLIENT_ID,
 		"client_secret": SHAREPOINT_CLIENT_SECRET,
@@ -78,7 +79,13 @@ def _onedrive_token():
 
 def _onedrive_url():
 	caminho = quote(SHAREPOINT_FILE_PATH.strip("/"), safe="/")
-	return f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
+	# Se SITE_ID/DRIVE_ID estiverem definidos, mantém compatibilidade com SharePoint.
+	if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
+		return f"https://graph.microsoft.com/v1.0/sites/{quote(SHAREPOINT_SITE_ID, safe='')}/drives/{quote(SHAREPOINT_DRIVE_ID, safe='')}/root:/{caminho}:/content"
+	if not ONEDRIVE_USER:
+		raise RuntimeError("SHAREPOINT_USER/ONEDRIVE_USER é obrigatório quando SITE_ID e DRIVE_ID não forem usados.")
+	usuario = quote(ONEDRIVE_USER, safe="")
+	return f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/root:/{caminho}:/content"
 
 
 def obter_planilha():
@@ -116,31 +123,8 @@ def _baixar_planilha_one_drive():
 
 
 def salvar_planilha():
-	"""Envia a planilha modificada de volta para o SharePoint."""
-	if not _onedrive_configurado():
-		return False
-	try:
-		with open(PLANILHA, "rb") as arquivo:
-			conteudo = arquivo.read()
-		if not conteudo:
-			raise RuntimeError("Recusando enviar uma planilha vazia ao SharePoint.")
-		request = Request(_onedrive_url(), data=conteudo, method="PUT", headers={
-			"Authorization": f"Bearer {_onedrive_token()}",
-			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		})
-		with urlopen(request, timeout=120) as resposta:
-			if resposta.status not in (200, 201):
-				raise RuntimeError(f"Microsoft Graph retornou HTTP {resposta.status}.")
-		return True
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1500]
-		if erro.code in (401, 403):
-			raise RuntimeError("Microsoft Graph recusou a gravacao. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
-		if erro.code == 404:
-			raise RuntimeError(f"Arquivo nao localizado para gravacao. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'.") from erro
-		raise RuntimeError(f"Nao foi possivel salvar a planilha no SharePoint (HTTP {erro.code}): {detalhe}") from erro
-	except (URLError, OSError) as erro:
-		raise RuntimeError(f"Nao foi possivel salvar a planilha no SharePoint: {erro}") from erro
+	"""Impedida de fazer PUT cego; toda escrita deve usar eTag/If-Match."""
+	raise RuntimeError("Gravação direta desabilitada. Use executar_mutacao_atomica().")
 
 
 def _enviar_planilha_one_drive():
@@ -165,21 +149,155 @@ def _graph_download_diagnostico():
 
 
 def _graph_upload_diagnostico(conteudo, etag=None):
-	"""Envia o XLSX gerado pela aplicação ao arquivo remoto."""
+	"""PUT condicional no arquivo remoto; If-Match impede sobrescrita de versão concorrente."""
 	token = _onedrive_token()
+	headers = {
+		"Authorization": f"Bearer {token}",
+		"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	}
+	if etag:
+		headers["If-Match"] = etag
 	requisicao = Request(
 		_onedrive_url(),
 		data=conteudo,
 		method="PUT",
-		headers={
-			"Authorization": f"Bearer {token}",
-			"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		},
+		headers=headers,
 	)
-	if etag:
-		requisicao.add_header("If-Match", etag)
-	with urlopen(requisicao, timeout=60) as resposta:
-		return resposta.status
+	try:
+		with urlopen(requisicao, timeout=120) as resposta:
+			return resposta.status
+	except HTTPError as erro:
+		if erro.code == 412:
+			raise ConcurrentUpdateError("O arquivo do SharePoint foi alterado por outra instância durante a gravação.") from erro
+		if erro.code in (401, 403):
+			raise RuntimeError("Microsoft Graph recusou a gravação. Verifique o consentimento administrativo e Files.ReadWrite.All.") from erro
+		if erro.code == 404:
+			raise RuntimeError(f"Arquivo não localizado para gravação. Verifique SHAREPOINT_FILE_PATH='{SHAREPOINT_FILE_PATH}'.") from erro
+		detalhe = erro.read().decode("utf-8", errors="replace")[:1200]
+		raise RuntimeError(f"Falha SharePoint HTTP {erro.code}: {detalhe}") from erro
+
+
+class ConcurrentUpdateError(RuntimeError):
+	pass
+
+
+def _graph_snapshot():
+	"""Lê metadados e bytes do mesmo arquivo remoto."""
+	meta = _graph_metadata_diagnostico()
+	etag = meta.get("eTag")
+	if not etag:
+		raise RuntimeError("O SharePoint não retornou o eTag do arquivo remoto.")
+	conteudo = _graph_download_diagnostico()
+	if not conteudo:
+		raise RuntimeError("O arquivo remoto está vazio.")
+	return meta, conteudo
+
+
+def _gerar_xlsx_com_demanda(conteudo_remoto, demanda, historico):
+	"""Atualiza o XLSX remoto preservando todas as abas e linhas existentes."""
+	workbook = load_workbook(io.BytesIO(conteudo_remoto))
+	try:
+		if "demandas" not in workbook.sheetnames or "historico" not in workbook.sheetnames:
+			raise RuntimeError("O arquivo remoto precisa conter as abas demandas e historico.")
+		planilha = workbook["demandas"]
+		cabecalho = [c.value for c in planilha[1]]
+		indices = {nome: cabecalho.index(nome) + 1 for nome in TABELAS_EXCEL["demandas"] if nome in cabecalho}
+		if len(indices) != len(TABELAS_EXCEL["demandas"]):
+			raise RuntimeError("A aba demandas não possui todas as colunas esperadas.")
+		planilha.append([demanda[coluna] for coluna in TABELAS_EXCEL["demandas"]])
+		planilha_h = workbook["historico"]
+		cab_h = [c.value for c in planilha_h[1]]
+		if not all(c in cab_h for c in TABELAS_EXCEL["historico"]):
+			raise RuntimeError("A aba historico não possui todas as colunas esperadas.")
+		planilha_h.append([historico[coluna] for coluna in TABELAS_EXCEL["historico"]])
+		buffer = io.BytesIO()
+		workbook.save(buffer)
+		return buffer.getvalue()
+	finally:
+		workbook.close()
+
+
+def _confirmar_demanda_no_xlsx(conteudo, demanda_id):
+	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+	try:
+		if "demandas" not in workbook.sheetnames:
+			return False
+		planilha = workbook["demandas"]
+		cabecalho = [c.value for c in next(planilha.iter_rows(min_row=1, max_row=1))]
+		if "id" not in cabecalho:
+			raise RuntimeError("A aba demandas não possui a coluna id.")
+		idx = cabecalho.index("id")
+		return any(linha[idx] == demanda_id for linha in planilha.iter_rows(min_row=2, values_only=True))
+	finally:
+		workbook.close()
+
+
+def salvar_demanda_atomicamente(valores, usuario_id, tentativas=3):
+	"""Cria uma demanda com controle otimista de concorrência no SharePoint."""
+	if not _onedrive_configurado():
+		raise RuntimeError("Integração SharePoint não está configurada.")
+	for tentativa in range(1, tentativas + 1):
+		with ARQUIVO_LOCK:
+			meta, remoto_antes = _graph_snapshot()
+			etag = meta["eTag"]
+			conn = conectar()
+			conn._conn.rollback()
+			for tabela in reversed(tuple(TABELAS_EXCEL.keys())):
+				conn._conn.execute(f"DELETE FROM {tabela}")
+			_carregar_xlsx_bytes_na_conexao(conn, remoto_antes)
+			agora_valor = agora()
+			cur = conn._conn.execute(
+				"INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				(*valores, usuario_id, agora_valor, agora_valor),
+			)
+			demanda_id = cur.lastrowid
+			historico_id = conn._conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM historico").fetchone()[0]
+			historico = {"id": historico_id, "demanda_id": demanda_id, "usuario_id": usuario_id, "acao": "CRIACAO", "descricao": "Demanda cadastrada.", "data_hora": agora_valor}
+			conn._conn.execute(
+				"INSERT INTO historico (id, demanda_id, usuario_id, acao, descricao, data_hora) VALUES (?, ?, ?, ?, ?, ?)",
+				tuple(historico[c] for c in TABELAS_EXCEL["historico"]),
+			)
+			conn._conn.commit()
+			demanda = {c: conn._conn.execute(f"SELECT {c} FROM demandas WHERE id = ?", (demanda_id,)).fetchone()[0] for c in TABELAS_EXCEL["demandas"]}
+			novo_xlsx = _gerar_xlsx_com_demanda(remoto_antes, demanda, historico)
+			hash_enviado = hashlib.sha256(novo_xlsx).hexdigest()
+			try:
+				status_put = _graph_upload_diagnostico(novo_xlsx, etag=etag)
+			except ConcurrentUpdateError:
+				if tentativa == tentativas:
+					raise RuntimeError("Não foi possível gravar porque o Excel foi alterado por outra instância. Tente novamente.")
+				continue
+			if status_put not in (200, 201):
+				raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
+			remoto_depois = _graph_download_diagnostico()
+			hash_remoto = hashlib.sha256(remoto_depois).hexdigest()
+			if hash_remoto != hash_enviado:
+				raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado.")
+			if not _confirmar_demanda_no_xlsx(remoto_depois, demanda_id):
+				raise RuntimeError("A demanda não foi encontrada no arquivo remoto após a gravação.")
+			return {"status": "OK", "demanda_id": demanda_id, "tentativa": tentativa, "etag_antes": etag, "sha256": hash_remoto, "mensagem": "Demanda cadastrada e confirmada no SharePoint."}
+	raise RuntimeError("Falha de concorrência ao gravar a demanda.")
+
+
+def _carregar_xlsx_bytes_na_conexao(conn, conteudo):
+	"""Carrega um snapshot XLSX em uma conexão SQLite em memória já existente."""
+	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+	try:
+		for tabela, colunas in TABELAS_EXCEL.items():
+			if tabela not in workbook.sheetnames:
+				continue
+			planilha = workbook[tabela]
+			cabecalho = [c.value for c in next(planilha.iter_rows(min_row=1, max_row=1))]
+			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
+			if len(indices) != len(colunas):
+				continue
+			for linha in planilha.iter_rows(min_row=2, values_only=True):
+				if not any(v is not None for v in linha):
+					continue
+				valores_linha = tuple(linha[indices[c]] for c in colunas)
+				conn._conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", valores_linha)
+	finally:
+		workbook.close()
 
 
 def salvar_demanda_com_confirmacao(demanda):
@@ -236,6 +354,69 @@ def salvar_demanda_com_confirmacao(demanda):
 	if not encontrada:
 		raise RuntimeError("Arquivo remoto não contém a demanda recém gravada.")
 	return {"status": "OK", "hash_enviado": novo_hash, "hash_remoto": hashlib.sha256(remoto_confirmacao).hexdigest(), "mensagem": "Demanda cadastrada e confirmada no SharePoint."}
+
+
+def salvar_demanda_sharepoint_seguro(demanda_id):
+	"""Atualiza uma demanda remota com eTag e confirma a persistência."""
+	metadata = _graph_metadata_diagnostico()
+	etag = metadata.get("eTag")
+	if not etag:
+		raise RuntimeError("SharePoint não retornou eTag.")
+
+	arquivo_remoto = _graph_download_diagnostico()
+	workbook = load_workbook(io.BytesIO(arquivo_remoto))
+	try:
+		if "demandas" not in workbook.sheetnames:
+			raise RuntimeError("Aba demandas não encontrada.")
+
+		conn = conectar()
+		registro = conn.execute("SELECT * FROM demandas WHERE id = ?", (demanda_id,)).fetchone()
+		conn.close()
+		if not registro:
+			raise RuntimeError("Demanda não encontrada.")
+
+		planilha = workbook["demandas"]
+		cabecalho = [celula.value for celula in planilha[1]]
+		try:
+			indice_id = cabecalho.index("id") + 1
+		except ValueError as erro:
+			raise RuntimeError("A aba demandas não possui a coluna id.") from erro
+
+		valores = [registro[coluna] for coluna in TABELAS_EXCEL["demandas"]]
+		linha_localizada = next((linha for linha in range(2, planilha.max_row + 1) if planilha.cell(linha, indice_id).value == registro["id"]), None)
+		if linha_localizada:
+			for coluna, valor in enumerate(valores, start=1):
+				planilha.cell(linha_localizada, coluna).value = valor
+		else:
+			planilha.append(valores)
+
+		buffer = io.BytesIO()
+		workbook.save(buffer)
+		bytes_xlsx = buffer.getvalue()
+	finally:
+		workbook.close()
+
+	hash_enviado = hashlib.sha256(bytes_xlsx).hexdigest()
+	status = _graph_upload_diagnostico(bytes_xlsx, etag)
+	if status not in (200, 201):
+		raise RuntimeError("Falha ao gravar no SharePoint.")
+
+	remoto = _graph_download_diagnostico()
+	hash_remoto = hashlib.sha256(remoto).hexdigest()
+	if hash_enviado != hash_remoto:
+		raise RuntimeError("Confirmação SHA-256 falhou.")
+
+	workbook_confirmacao = load_workbook(io.BytesIO(remoto), read_only=True, data_only=True)
+	try:
+		planilha_confirmacao = workbook_confirmacao["demandas"]
+		cabecalho_confirmacao = [celula.value for celula in next(planilha_confirmacao.iter_rows(min_row=1, max_row=1))]
+		indice_confirmacao = cabecalho_confirmacao.index("id")
+		encontrada = any(linha[indice_confirmacao] == demanda_id for linha in planilha_confirmacao.iter_rows(min_row=2, values_only=True))
+	finally:
+		workbook_confirmacao.close()
+	if not encontrada:
+		raise RuntimeError("Demanda não localizada no arquivo remoto.")
+	return "Demanda cadastrada"
 
 
 def _criar_esquema(conn):
@@ -343,9 +524,9 @@ class ConexaoExcel:
 		return self._conn.executescript(consulta)
 
 	def commit(self):
+		# O XLSX remoto só é alterado pelos fluxos atômicos com eTag/If-Match.
 		with ARQUIVO_LOCK:
 			self._conn.commit()
-			_salvar_planilha(self._conn)
 
 	def close(self):
 		pass
@@ -360,16 +541,132 @@ def conectar():
 
 
 def sincronizar_planilha():
-	"""Reconstrói o XLSX a partir do banco atual e envia ao SharePoint."""
-	with ARQUIVO_LOCK:
-		if CONEXAO_COMPARTILHADA is None:
-			raise RuntimeError("Banco da aplicação ainda não foi inicializado.")
-		_salvar_planilha(CONEXAO_COMPARTILHADA._conn)
-		return True
+	"""Mantido por compatibilidade, mas sem PUT cego do banco em memória."""
+	return executar_mutacao_atomica(lambda workbook: {"operacao": "SINCRONIZACAO"})
 
 
 def agora():
 	return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _cabecalho_planilha(planilha):
+	return [celula.value for celula in next(planilha.iter_rows(min_row=1, max_row=1))]
+
+
+def _linha_por_id(planilha, cabecalho, registro_id):
+	if "id" not in cabecalho:
+		raise RuntimeError(f"A aba {planilha.title} não possui a coluna id.")
+	indice = cabecalho.index("id") + 1
+	for numero_linha in range(2, planilha.max_row + 1):
+		if planilha.cell(numero_linha, indice).value == registro_id:
+			return numero_linha
+	return None
+
+
+def _proximo_id(planilha, cabecalho):
+	if "id" not in cabecalho:
+		raise RuntimeError(f"A aba {planilha.title} não possui a coluna id.")
+	indice = cabecalho.index("id") + 1
+	maior = 0
+	for numero_linha in range(2, planilha.max_row + 1):
+		valor = planilha.cell(numero_linha, indice).value
+		try:
+			maior = max(maior, int(valor))
+		except (TypeError, ValueError):
+			continue
+	return maior + 1
+
+
+def _salvar_workbook_preservando_arquivo(workbook):
+	buffer = io.BytesIO()
+	workbook.save(buffer)
+	return buffer.getvalue()
+
+
+def _atualizar_conexao_com_snapshot(conteudo):
+	"""Depois de uma gravação confirmada, faz a conexão em memória refletir o XLSX remoto."""
+	global CONEXAO_COMPARTILHADA
+	with ARQUIVO_LOCK:
+		if CONEXAO_COMPARTILHADA is None:
+			CONEXAO_COMPARTILHADA = ConexaoExcel()
+		conn = CONEXAO_COMPARTILHADA
+		conn._conn.rollback()
+		for tabela in reversed(tuple(TABELAS_EXCEL.keys())):
+			conn._conn.execute(f"DELETE FROM {tabela}")
+		_carregar_xlsx_bytes_na_conexao(conn, conteudo)
+		conn._conn.commit()
+	return conn
+
+
+def executar_mutacao_atomica(mutator, confirmador=None, tentativas=3):
+	"""Executa qualquer escrita do sistema contra a versão atual do Excel."""
+	if not _onedrive_configurado():
+		raise RuntimeError("Integração SharePoint não está configurada.")
+	ultimo_conflito = None
+	for tentativa in range(1, tentativas + 1):
+		with ARQUIVO_LOCK:
+			meta, remoto_antes = _graph_snapshot()
+			etag = meta["eTag"]
+			workbook = load_workbook(io.BytesIO(remoto_antes))
+			try:
+				resultado = mutator(workbook)
+				novo_xlsx = _salvar_workbook_preservando_arquivo(workbook)
+			finally:
+				workbook.close()
+			try:
+				status_put = _graph_upload_diagnostico(novo_xlsx, etag=etag)
+			except ConcurrentUpdateError as erro:
+				ultimo_conflito = erro
+				continue
+			if status_put not in (200, 201):
+				raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
+			remoto_depois = _graph_download_diagnostico()
+			if hashlib.sha256(remoto_depois).hexdigest() != hashlib.sha256(novo_xlsx).hexdigest():
+				raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado; a operação não foi confirmada.")
+			if confirmador is not None and not confirmador(remoto_depois, resultado):
+				raise RuntimeError("A operação foi enviada, mas não pôde ser confirmada no arquivo remoto.")
+			_atualizar_conexao_com_snapshot(remoto_depois)
+			return resultado
+	if ultimo_conflito:
+		raise RuntimeError("O Excel foi alterado simultaneamente por outra instância. Tente novamente.") from ultimo_conflito
+	raise RuntimeError("Não foi possível concluir a gravação no SharePoint.")
+
+
+def _append_registro(planilha, colunas, registro):
+	cabecalho = _cabecalho_planilha(planilha)
+	if not all(c in cabecalho for c in colunas):
+		raise RuntimeError(f"A aba {planilha.title} não possui todas as colunas esperadas.")
+	linha = planilha.max_row + 1
+	for coluna, nome in enumerate(cabecalho, start=1):
+		if nome in colunas:
+			planilha.cell(linha, coluna).value = registro[nome]
+	return linha
+
+
+def _atualizar_registro(planilha, colunas, registro_id, registro):
+	cabecalho = _cabecalho_planilha(planilha)
+	linha = _linha_por_id(planilha, cabecalho, registro_id)
+	if linha is None:
+		raise RuntimeError(f"Registro {registro_id} não encontrado na aba {planilha.title}.")
+	for coluna, nome in enumerate(cabecalho, start=1):
+		if nome in colunas:
+			planilha.cell(linha, coluna).value = registro[nome]
+	return linha
+
+
+def _confirmar_id_na_aba(conteudo, aba, registro_id):
+	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+	try:
+		if aba not in workbook.sheetnames:
+			return False
+		planilha = workbook[aba]
+		cabecalho = _cabecalho_planilha(planilha)
+		if "id" not in cabecalho:
+			return False
+		idx = cabecalho.index("id")
+		return any(linha[idx] == registro_id for linha in planilha.iter_rows(min_row=2, values_only=True))
+	finally:
+		workbook.close()
 
 
 def criar_banco():
@@ -434,11 +731,15 @@ def calcular_prazos(prazo_area, prazo_fatal):
 
 
 def registrar_historico(demanda_id, usuario_id, acao, descricao):
-	conn = conectar()
-	conn.execute("INSERT INTO historico (demanda_id, usuario_id, acao, descricao, data_hora) VALUES (?, ?, ?, ?, ?)",
-				 (demanda_id, usuario_id, acao, descricao, agora()))
-	conn.commit()
-	conn.close()
+	"""Registra histórico no mesmo ciclo atômico do Excel remoto."""
+	def mutator(workbook):
+		planilha = workbook["historico"]
+		cabecalho = _cabecalho_planilha(planilha)
+		historico_id = _proximo_id(planilha, cabecalho)
+		registro = {"id": historico_id, "demanda_id": demanda_id, "usuario_id": usuario_id, "acao": acao, "descricao": descricao, "data_hora": agora()}
+		_append_registro(planilha, TABELAS_EXCEL["historico"], registro)
+		return registro
+	return executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "historico", r["id"]))
 
 
 def usuario_logado():
@@ -554,20 +855,32 @@ def acesso_login():
 
 @app.route("/configurar", methods=["GET", "POST"])
 def configurar():
-	conn = conectar()
-	total = conn.execute("SELECT COUNT(*) total FROM usuarios").fetchone()["total"]
-	conn.close()
-	if total:
-		return redirect(url_for("login"))
 	if request.method == "POST":
 		nome, usuario, senha = request.form["nome"].strip(), request.form["usuario"].strip(), request.form["senha"]
 		if len(senha) < 8:
 			return pagina("Configuração", '<div class="card"><div class="erro">A senha precisa ter pelo menos 8 caracteres.</div></div>')
-		conn = conectar()
-		conn.execute("INSERT INTO usuarios (nome, usuario, senha_hash, perfil, ativo, aprovado, criado_em) VALUES (?, ?, ?, ?, 1, 1, ?)",
-					 (nome, usuario, bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), "Administrador", agora()))
-		conn.commit(); conn.close()
-		return redirect(url_for("login"))
+		def mutator(workbook):
+			planilha = workbook["usuarios"]
+			cabecalho = _cabecalho_planilha(planilha)
+			if planilha.max_row > 1:
+				raise RuntimeError("O sistema já possui usuário cadastrado.")
+			registro = {"id": _proximo_id(planilha, cabecalho), "nome": nome, "usuario": usuario, "email": "", "senha_hash": bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), "perfil": "Administrador", "ativo": 1, "aprovado": 1, "criado_em": agora()}
+			_append_registro(planilha, TABELAS_EXCEL["usuarios"], registro)
+			return registro
+		try:
+			executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "usuarios", r["id"]))
+			return redirect(url_for("login"))
+		except Exception as erro:
+			return pagina("Configuração", f'<div class="card"><div class="erro">Não foi possível concluir a configuração: {html.escape(str(erro))}</div></div>')
+	try:
+		_, remoto = _graph_snapshot()
+		wb = load_workbook(io.BytesIO(remoto), read_only=True, data_only=True)
+		total = max(wb["usuarios"].max_row - 1, 0) if "usuarios" in wb.sheetnames else 0
+		wb.close()
+		if total:
+			return redirect(url_for("login"))
+	except Exception:
+		pass
 	return pagina("Configuração inicial", '<div class="card" style="max-width:500px;margin:auto"><h1>SP ÁGUAS</h1><h2>Configuração inicial</h2><p>Crie o primeiro usuário administrador.</p><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>Senha</label><input type="password" name="senha" minlength="8" required><button>Criar administrador</button></form></div>')
 
 
@@ -594,11 +907,24 @@ def cadastro():
 		if senha != request.form["confirmar"]: erro = "As senhas não coincidem."
 		elif len(senha) < 8: erro = "A senha precisa ter pelo menos 8 caracteres."
 		else:
+			def mutator(workbook):
+				planilha = workbook["usuarios"]
+				cabecalho = _cabecalho_planilha(planilha)
+				idx_usuario, idx_email = cabecalho.index("usuario"), cabecalho.index("email")
+				for linha in planilha.iter_rows(min_row=2, values_only=True):
+					if linha[idx_usuario] == usuario or (email and linha[idx_email] == email):
+						raise sqlite3.IntegrityError("Usuário ou e-mail já cadastrado.")
+				registro = {"id": _proximo_id(planilha, cabecalho), "nome": nome, "usuario": usuario, "email": email, "senha_hash": bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), "perfil": "Usuario", "ativo": 1, "aprovado": 0, "criado_em": agora()}
+				_append_registro(planilha, TABELAS_EXCEL["usuarios"], registro)
+				return registro
 			try:
-				conn = conectar(); conn.execute("INSERT INTO usuarios (nome, usuario, email, senha_hash, criado_em) VALUES (?, ?, ?, ?, ?)", (nome, usuario, email, bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(), agora())); conn.commit(); conn.close()
+				executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "usuarios", r["id"]))
 				return pagina("Cadastro realizado", '<div class="card"><h1>Cadastro realizado</h1><p>Aguarde a aprovação do administrador.</p><a class="btn" href="/">Voltar ao login</a></div>')
-			except sqlite3.IntegrityError: erro = "Usuário ou e-mail já cadastrado."
-		return pagina("Cadastro", f'<div class="card"><div class="erro">{erro}</div><a href="/cadastro" class="btn">Voltar</a></div>')
+			except sqlite3.IntegrityError:
+				erro = "Usuário ou e-mail já cadastrado."
+			except Exception as exc:
+				erro = f"Não foi possível concluir o cadastro: {exc}"
+		return pagina("Cadastro", f'<div class="card"><div class="erro">{html.escape(erro)}</div><a href="/cadastro" class="btn">Voltar</a></div>')
 	return pagina("Cadastro", '<div class="card" style="max-width:550px;margin:auto"><h2>Criar acesso ao sistema</h2><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>E-mail</label><input type="email" name="email" required><label>Senha</label><input type="password" name="senha" minlength="8" required><label>Confirmar senha</label><input type="password" name="confirmar" minlength="8" required><button>Criar minha conta</button></form></div>')
 
 
@@ -643,7 +969,26 @@ def nova_demanda():
 		valores = ler_demanda_form(); erro = validar_demanda(valores)
 		if erro:
 			return pagina("Nova demanda", f'<div class="card"><div class="erro">{erro}</div></div>' + formulario())
-		conn = conectar(); cur = conn.execute("INSERT INTO demandas (numero_processo, origem, assunto, area, responsavel, data_recebimento, prazo_area, prazo_fatal, situacao, prioridade, observacoes, criado_por, criado_em, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*valores, session["usuario_id"], agora(), agora())); demanda_id = cur.lastrowid; conn.commit(); conn.close(); registrar_historico(demanda_id, session["usuario_id"], "CRIACAO", "Demanda cadastrada."); return redirect(url_for("demandas"))
+		def mutator(workbook):
+			planilha = workbook["demandas"]
+			cabecalho = _cabecalho_planilha(planilha)
+			demanda_id = _proximo_id(planilha, cabecalho)
+			agora_valor = agora()
+			registro = dict(zip(TABELAS_EXCEL["demandas"], (demanda_id, *valores, session["usuario_id"], agora_valor, agora_valor)))
+			_append_registro(planilha, TABELAS_EXCEL["demandas"], registro)
+			planilha_h = workbook["historico"]
+			historico_id = _proximo_id(planilha_h, _cabecalho_planilha(planilha_h))
+			historico = {"id": historico_id, "demanda_id": demanda_id, "usuario_id": session["usuario_id"], "acao": "CRIACAO", "descricao": "Demanda cadastrada.", "data_hora": agora_valor}
+			_append_registro(planilha_h, TABELAS_EXCEL["historico"], historico)
+			return {"demanda_id": demanda_id, "historico_id": historico_id}
+		try:
+			resultado = executar_mutacao_atomica(
+				mutator,
+				lambda conteudo, r: _confirmar_id_na_aba(conteudo, "demandas", r["demanda_id"]) and _confirmar_id_na_aba(conteudo, "historico", r["historico_id"]),
+			)
+		except Exception as erro:
+			return pagina("Nova demanda", f'<div class="card"><div class="erro">Demanda NÃO confirmada no SharePoint. {html.escape(str(erro))}</div><a class="btn" href="/nova-demanda">Tentar novamente</a> <a class="btn btn-cinza" href="/demandas">Voltar</a></div>')
+		return redirect(url_for("demandas"))
 	return pagina("Nova demanda", formulario())
 
 
@@ -673,14 +1018,47 @@ def editar(id):
 		valores = ler_demanda_form(); erro = validar_demanda(valores)
 		if erro:
 			conn.close(); return pagina("Editar demanda", f'<div class="card"><div class="erro">{erro}</div></div>' + formulario(demanda))
-		conn.execute("UPDATE demandas SET numero_processo=?, origem=?, assunto=?, area=?, responsavel=?, data_recebimento=?, prazo_area=?, prazo_fatal=?, situacao=?, prioridade=?, observacoes=?, atualizado_em=? WHERE id=?", (*valores, agora(), id)); conn.commit(); conn.close(); registrar_historico(id, session["usuario_id"], "EDICAO", "Demanda alterada."); return redirect(url_for("demandas"))
+		usuario_id = session["usuario_id"]
+		def mutator(workbook):
+			planilha = workbook["demandas"]
+			registro = dict(zip(TABELAS_EXCEL["demandas"], (id, *valores, demanda["criado_por"], demanda["criado_em"], agora())))
+			_atualizar_registro(planilha, TABELAS_EXCEL["demandas"], id, registro)
+			ph = workbook["historico"]
+			hid = _proximo_id(ph, _cabecalho_planilha(ph))
+			historico = {"id": hid, "demanda_id": id, "usuario_id": usuario_id, "acao": "EDICAO", "descricao": "Demanda alterada.", "data_hora": agora()}
+			_append_registro(ph, TABELAS_EXCEL["historico"], historico)
+			return {"demanda_id": id, "historico_id": hid}
+		try:
+			executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "demandas", id) and _confirmar_id_na_aba(conteudo, "historico", r["historico_id"]))
+		except Exception as exc:
+			conn.close()
+			return pagina("Editar demanda", f'<div class="card"><div class="erro">Alteração NÃO confirmada no SharePoint: {html.escape(str(exc))}</div><a class="btn" href="/editar/{id}">Tentar novamente</a></div>')
+		conn.close(); return redirect(url_for("demandas"))
 	conn.close(); return pagina("Editar demanda", formulario(demanda))
 
 
 @app.route("/excluir/<int:id>", methods=["POST"])
 def excluir(id):
 	if not administrador(): return "Acesso negado.", 403
-	conn = conectar(); conn.execute("DELETE FROM demandas WHERE id = ?", (id,)); conn.execute("DELETE FROM historico WHERE demanda_id = ?", (id,)); conn.commit(); conn.close(); return redirect(url_for("demandas"))
+	def mutator(workbook):
+		planilha = workbook["demandas"]
+		cab = _cabecalho_planilha(planilha)
+		linha = _linha_por_id(planilha, cab, id)
+		if linha is None:
+			raise RuntimeError("Demanda não encontrada.")
+		planilha.delete_rows(linha, 1)
+		hist = workbook["historico"]
+		cab_h = _cabecalho_planilha(hist)
+		idx_demanda = cab_h.index("demanda_id") + 1
+		for linha_h in range(hist.max_row, 1, -1):
+			if hist.cell(linha_h, idx_demanda).value == id:
+				hist.delete_rows(linha_h, 1)
+		return {"demanda_id": id}
+	try:
+		executar_mutacao_atomica(mutator, lambda conteudo, r: not _confirmar_id_na_aba(conteudo, "demandas", id))
+	except Exception as exc:
+		return pagina("Excluir demanda", f'<div class="card"><div class="erro">Exclusão NÃO confirmada no SharePoint: {html.escape(str(exc))}</div><a class="btn" href="/demandas">Voltar</a></div>'), 500
+	return redirect(url_for("demandas"))
 
 
 @app.route("/alertas")
@@ -698,11 +1076,36 @@ def alertas():
 def usuarios():
 	if not administrador(): return "Acesso negado.", 403
 	if request.method == "POST":
-		acao, usuario_id = request.form["acao"], request.form["usuario_id"]; conn = conectar()
-		if acao == "aprovar": conn.execute("UPDATE usuarios SET aprovado=1, ativo=1 WHERE id=?", (usuario_id,))
-		elif acao == "bloquear": conn.execute("UPDATE usuarios SET ativo=0 WHERE id=?", (usuario_id,))
-		elif acao == "ativar": conn.execute("UPDATE usuarios SET ativo=1, aprovado=1 WHERE id=?", (usuario_id,))
-		conn.commit(); conn.close()
+		acao, usuario_id = request.form["acao"], int(request.form["usuario_id"])
+		if acao not in {"aprovar", "bloquear", "ativar"}: return "Ação inválida.", 400
+		def mutator(workbook):
+			planilha = workbook["usuarios"]
+			cab = _cabecalho_planilha(planilha)
+			linha = _linha_por_id(planilha, cab, usuario_id)
+			if linha is None: raise RuntimeError("Usuário não encontrado.")
+			if acao == "aprovar":
+				planilha.cell(linha, cab.index("aprovado") + 1).value = 1
+				planilha.cell(linha, cab.index("ativo") + 1).value = 1
+			elif acao == "bloquear":
+				planilha.cell(linha, cab.index("ativo") + 1).value = 0
+			else:
+				planilha.cell(linha, cab.index("ativo") + 1).value = 1
+				planilha.cell(linha, cab.index("aprovado") + 1).value = 1
+			return {"usuario_id": usuario_id, "acao": acao}
+		def confirmar(conteudo, resultado):
+			wb = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+			try:
+				ws = wb["usuarios"]; cab = _cabecalho_planilha(ws); idx = cab.index("id"); ia = cab.index("ativo"); ip = cab.index("aprovado")
+				for linha in ws.iter_rows(min_row=2, values_only=True):
+					if linha[idx] == resultado["usuario_id"]:
+						if resultado["acao"] == "bloquear": return linha[ia] == 0
+						return linha[ia] == 1 and linha[ip] == 1
+				return False
+			finally: wb.close()
+		try:
+			executar_mutacao_atomica(mutator, confirmar)
+		except Exception as exc:
+			return pagina("Usuários", f'<div class="card"><div class="erro">Alteração de usuário NÃO confirmada no SharePoint: {html.escape(str(exc))}</div></div>')
 	conn = conectar(); lista = conn.execute("SELECT * FROM usuarios ORDER BY nome").fetchall(); conn.close()
 	linhas = ''.join(f'<tr><td>{u["nome"]}</td><td>{u["usuario"]}</td><td>{u["email"] or "-"}</td><td>{u["perfil"]}</td><td>{"Aprovado" if u["aprovado"] else "Pendente"}</td><td>{"Ativo" if u["ativo"] else "Bloqueado"}</td><td><form method="post"><input type="hidden" name="usuario_id" value="{u["id"]}"><input type="hidden" name="acao" value="{"bloquear" if u["ativo"] else "ativar"}"><button>{"Bloquear" if u["ativo"] else "Ativar"}</button></form></td></tr>' for u in lista)
 	return pagina("Usuários", f'<div class="card"><h1>Usuários</h1><table><tr><th>Nome</th><th>Usuário</th><th>E-mail</th><th>Perfil</th><th>Aprovação</th><th>Status</th><th>Ação</th></tr>{linhas}</table></div>')
@@ -855,10 +1258,10 @@ def teste_integracao():
 		return jsonify(resultado), 500
 
 	try:
-		requisicao = Request(_onedrive_url(), data=arquivo_original, method="PUT", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"})
-		with urlopen(requisicao, timeout=120) as resposta:
-			if resposta.status not in (200, 201):
-				raise RuntimeError(f"Microsoft Graph retornou HTTP {resposta.status}.")
+		meta_teste = _graph_metadata_diagnostico()
+		status_put = _graph_upload_diagnostico(arquivo_original, etag=meta_teste.get("eTag"))
+		if status_put not in (200, 201):
+			raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
 		etapa("6. Gravação no SharePoint", "OK", "O Graph aceitou os mesmos bytes do arquivo.")
 	except Exception as erro:
 		etapa("6. Gravação no SharePoint", "ERRO", str(erro))
