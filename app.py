@@ -970,57 +970,69 @@ def popup_alertas():
 
 
 HTML_BASE = """
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ titulo or 'SP ÁGUAS' }}</title><style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f3f6f9;color:#263238}header{background:linear-gradient(135deg,#005b96,#0077b6);color:#fff;padding:18px 30px;box-shadow:0 2px 8px #0003}.logo{font-size:22px;font-weight:bold}.menu{margin-top:15px}.menu a{color:#fff;text-decoration:none;margin-right:18px;font-size:14px}.container{max-width:1400px;margin:auto;padding:25px}.card,.metrica{background:#fff;border-radius:12px;padding:22px;margin-bottom:22px;box-shadow:0 2px 8px #0001}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:15px}.metrica strong{display:block;font-size:30px;margin-top:10px;color:#005b96}.metrica h3{margin:0;color:#607d8b;font-size:14px}input,select,textarea{width:100%;padding:11px;border:1px solid #cfd8dc;border-radius:6px;margin:6px 0 15px;font-size:14px}textarea{min-height:100px}label{font-weight:bold;font-size:13px}button,.btn{background:#0077b6;color:#fff;border:0;border-radius:6px;padding:10px 16px;cursor:pointer;text-decoration:none;display:inline-block}.btn-verde{background:#2e7d32}.btn-vermelho{background:#c62828}.btn-cinza{background:#607d8b}table{width:100%;border-collapse:collapse;background:#fff}th{background:#005b96;color:#fff;padding:11px;text-align:left}td{padding:10px;border-bottom:1px solid #e0e0e0;font-size:13px}.alerta{padding:15px;border-radius:8px;margin-bottom:10px}.vencido{background:#ffebee;color:#b71c1c}.critico{background:#fff3e0;color:#e65100}.proximo{background:#fffde7;color:#827717}.normal{background:#e8f5e9;color:#1b5e20}.info{background:#e3f2fd;color:#0d47a1}.erro{background:#ffebee;color:#b71c1c;padding:12px;border-radius:6px}@media(max-width:800px){.container{padding:12px}table{display:block;overflow-x:auto}}
-</style></head><body><header><div class="logo">SP ÁGUAS</div>{% if session.get('usuario_id') %}<div>Sistema de Gestão de Processos e Prazos</div><div class="menu"><a href="/sistema">Dashboard</a><a href="/demandas">Demandas</a><a href="/nova-demanda">Nova demanda</a><a href="/tce">TCE-SP</a><a href="/audesp">AUDESP</a><a href="/alertas">Alertas</a><a href="/calendario">Calendário</a><a href="/exportar">Exportar</a>{% if session.get('perfil') == 'Administrador' %}<a href="/usuarios">Usuários</a><a href="/status">Status</a>{% endif %}<a href="/logout">Sair</a></div>{% endif %}</header><main class="container">{{ conteudo|safe }}</main></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ titulo or 'SP ÁGUAS' }}</title>
+<style>
+:root{--navy:#063b57;--petrol:#087f9d;--cyan:#12a4c2;--bg:#f5f8fa;--card:#fff;--text:#20313b;--muted:#71808a;--line:#e2e9ed;--shadow:0 12px 32px rgba(14,49,67,.08);--radius:16px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",Arial,sans-serif;font-size:14px;line-height:1.5}
+a{color:inherit}.app-shell{min-height:100vh}.sidebar{position:fixed;z-index:50;inset:0 auto 0 0;width:258px;padding:24px 14px;background:linear-gradient(180deg,#063b57 0%,#07516e 58%,#087f9d 100%);color:#fff;box-shadow:8px 0 28px rgba(5,42,62,.14)}
+.brand{display:flex;align-items:center;gap:12px;padding:4px 12px 22px;border-bottom:1px solid rgba(255,255,255,.13)}.brand-mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:rgba(255,255,255,.13);font-weight:800;letter-spacing:-1px}.brand-title{font-weight:800;font-size:18px;letter-spacing:.3px}.brand-sub{display:block;margin-top:2px;color:rgba(255,255,255,.68);font-size:10px;text-transform:uppercase;letter-spacing:1px}
+.user-box{margin:18px 6px 12px;padding:12px;border-radius:12px;background:rgba(255,255,255,.08);font-size:12px;color:rgba(255,255,255,.82)}.user-box strong{display:block;color:#fff;font-size:13px;margin-bottom:2px}.menu{display:flex;flex-direction:column;gap:4px;margin-top:10px}.menu-label{padding:12px 12px 5px;color:rgba(255,255,255,.42);font-size:10px;text-transform:uppercase;letter-spacing:1.2px}.menu a{display:flex;align-items:center;gap:10px;margin:0;padding:10px 12px;border-radius:10px;color:rgba(255,255,255,.82);text-decoration:none;font-size:13px;transition:.18s ease}.menu a:hover,.menu a.ativo{background:rgba(255,255,255,.12);color:#fff;transform:translateX(2px)}.menu a.sair{margin-top:10px;color:#ffd9d5}.sidebar-footer{position:absolute;left:20px;right:20px;bottom:18px;color:rgba(255,255,255,.42);font-size:10px}
+.main{margin-left:258px;min-height:100vh}.topbar{height:72px;padding:0 38px;background:rgba(255,255,255,.92);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:20;backdrop-filter:blur(10px)}.breadcrumb{color:var(--muted);font-size:12px}.page-title{font-size:16px;font-weight:700;color:var(--navy)}.content{max-width:1500px;margin:0 auto;padding:32px 38px 50px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:24px}.page-head h1{margin:0;color:var(--navy);font-size:28px;letter-spacing:-.5px}.page-head p{margin:6px 0 0;color:var(--muted)}.actions{display:flex;gap:9px;flex-wrap:wrap}
+.card,.metrica{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:20px}.card h1{margin:0 0 7px;color:var(--navy);font-size:25px}.card h2{margin:0 0 15px;color:var(--navy);font-size:18px}.card h3{color:var(--navy)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.metrica{position:relative;overflow:hidden;padding:20px}.metrica:after{content:"";position:absolute;right:-22px;top:-22px;width:78px;height:78px;border-radius:50%;background:rgba(8,127,157,.06)}.metrica h3{margin:0;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}.metrica strong{display:block;margin-top:8px;color:var(--navy);font-size:30px;line-height:1.1}
+.stat-strip{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}.pill,.badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:700}.pill{background:#eef5f7;color:#526a75}.badge-vencido{background:#fdebec;color:#b42318}.badge-critico{background:#fff0df;color:#a65300}.badge-proximo{background:#fff8d9;color:#856404}.badge-normal{background:#e8f6ed;color:#23743a}.badge-concluido{background:#e9eef2;color:#52636d}.badge-info{background:#e6f4f8;color:#08657d}
+.btn,button{appearance:none;border:0;border-radius:9px;background:var(--petrol);color:#fff;text-decoration:none;padding:10px 15px;font:600 13px inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:.18s ease}.btn:hover,button:hover{background:#066b85;transform:translateY(-1px);box-shadow:0 7px 16px rgba(8,127,157,.18)}.btn-verde{background:#2e7d4b}.btn-verde:hover{background:#25683d}.btn-vermelho{background:#c43d38}.btn-vermelho:hover{background:#a9322e}.btn-cinza{background:#60727c}.btn-cinza:hover{background:#4e606a}.btn-outline{background:#fff;color:var(--petrol);border:1px solid #b9d5dc}.btn-outline:hover{background:#f2fafc;color:var(--petrol);box-shadow:none}
+.toolbar{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:16px}.toolbar form{display:flex;gap:9px;flex:1;min-width:260px}.toolbar form input{margin:0}.toolbar-actions{display:flex;gap:8px;flex-wrap:wrap}
+input,select,textarea{width:100%;padding:11px 12px;border:1px solid #d4e0e5;border-radius:9px;margin:6px 0 14px;background:#fbfdfe;color:var(--text);font:14px inherit;transition:.15s}input:focus,select:focus,textarea:focus{outline:0;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(18,164,194,.12);background:#fff}textarea{min-height:105px;resize:vertical}label{display:block;margin-top:4px;color:#40525c;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.45px}.form-section{padding:18px 0;border-top:1px solid var(--line)}.form-section:first-child{padding-top:0;border-top:0}.form-section h3{margin:0 0 13px;font-size:14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.form-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.full{grid-column:1/-1}.form-actions{display:flex;gap:9px;align-items:center;margin-top:6px;padding-top:18px;border-top:1px solid var(--line)}
+.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:separate;border-spacing:0;background:#fff;min-width:850px}th{position:sticky;top:0;background:#f7fafb;color:#61737d;padding:12px 11px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.55px;border-bottom:1px solid var(--line)}td{padding:13px 11px;border-bottom:1px solid #edf1f3;font-size:12px;vertical-align:middle}tr:last-child td{border-bottom:0}tbody tr:hover td{background:#fbfdfe}.table-title{font-weight:700;color:var(--navy)}
+.alerta{padding:15px 17px;border:1px solid var(--line);border-left:4px solid #9aa9b0;border-radius:11px;margin:10px 0;background:#fff;box-shadow:0 3px 10px rgba(20,50,65,.04)}.vencido{border-left-color:#c43d38;background:#fff9f9}.critico{border-left-color:#e36c08;background:#fffaf4}.proximo{border-left-color:#c18a05;background:#fffdf3}.normal{border-left-color:#2e7d4b;background:#f9fcfa}.info{background:#eef8fb;color:#0a637a}.erro{background:#fff0f0;color:#a3221d;padding:12px 14px;border:1px solid #f2c9c7;border-radius:9px;margin-bottom:14px}
+.empty{padding:42px 20px;text-align:center;color:var(--muted)}.empty strong{display:block;color:var(--navy);font-size:16px;margin-bottom:4px}.muted{color:var(--muted)}.success{background:#edf9f1;color:#216b39;border:1px solid #cbe9d4;padding:12px 14px;border-radius:9px}.danger-zone{border-color:#f0d4d2}.danger-zone h3{color:#a9322e}
+.login-page{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 15% 10%,rgba(18,164,194,.15),transparent 35%),linear-gradient(135deg,#eef6f8,#f8fafb)}.login-card{width:min(460px,100%);background:#fff;border:1px solid var(--line);border-radius:22px;box-shadow:0 22px 60px rgba(10,48,65,.12);padding:36px}.login-brand{text-align:center;margin-bottom:28px}.login-brand .brand-mark{margin:0 auto 12px;background:#e8f5f8;color:var(--navy)}.login-brand h1{margin:0;color:var(--navy);font-size:26px}.login-brand p{margin:5px 0;color:var(--muted);font-size:12px}
+.popup-alertas{display:none;position:fixed;inset:0;z-index:80;align-items:center;justify-content:center;padding:20px;background:rgba(4,26,39,.52)}.popup-alertas.visivel{display:flex;animation:aparecer .2s ease-out}.popup-alertas-conteudo{position:relative;width:min(520px,100%);padding:30px;border:1px solid #f0d6a6;border-radius:18px;background:#fffdf8;box-shadow:0 18px 50px rgba(7,30,45,.25)}.popup-alertas-conteudo h2{margin:0 0 8px;color:#7b3f00}.popup-alertas-conteudo ul{max-height:230px;margin:18px 0;padding-left:20px;color:#4b3b2a}.popup-alertas-conteudo li{margin:9px 0}.popup-fechar{position:absolute;top:10px;right:12px;padding:2px 9px;background:transparent;color:#6d6258;font-size:27px}.popup-icone{display:grid;width:34px;height:34px;margin-bottom:12px;place-items:center;border-radius:50%;background:#c62828;color:#fff;font-size:22px;font-weight:700}@keyframes aparecer{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}
+@media(max-width:1050px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.form-grid.three{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.sidebar{position:relative;width:100%;min-height:auto;padding:15px}.brand{padding-bottom:15px}.sidebar-footer{display:none}.user-box{display:none}.menu{flex-direction:row;flex-wrap:wrap}.menu-label{display:none}.menu a{padding:8px 9px}.main{margin-left:0}.topbar{height:58px;padding:0 16px}.content{padding:22px 14px 40px}.page-head{align-items:flex-start;flex-direction:column}.page-head h1{font-size:24px}.grid{grid-template-columns:1fr 1fr}.form-grid,.form-grid.three{grid-template-columns:1fr}.full{grid-column:auto}.toolbar form{min-width:100%}.login-card{padding:28px 22px}}
+@media(max-width:460px){.grid{grid-template-columns:1fr}.content{padding-left:10px;padding-right:10px}.card,.metrica{padding:17px}.topbar .breadcrumb{display:none}}
+</style>
+</head>
+<body>
+{% if session.get('usuario_id') %}
+<div class="app-shell">
+<aside class="sidebar">
+  <div class="brand"><div class="brand-mark">SA</div><div><div class="brand-title">SP ÁGUAS</div><span class="brand-sub">Gestão de demandas</span></div></div>
+  <div class="user-box"><strong>{{ session.get('nome','Usuário') }}</strong>{{ session.get('perfil','Usuário') }}</div>
+  <nav class="menu">
+    <div class="menu-label">Principal</div>
+    <a class="{% if request.path == '/sistema' %}ativo{% endif %}" href="/sistema">▦ &nbsp;Dashboard</a>
+    <a class="{% if request.path == '/demandas' %}ativo{% endif %}" href="/demandas">☷ &nbsp;Demandas</a>
+    <a class="{% if request.path == '/nova-demanda' %}ativo{% endif %}" href="/nova-demanda">＋ &nbsp;Nova demanda</a>
+    <div class="menu-label">Controle</div>
+    <a class="{% if request.path == '/tce' %}ativo{% endif %}" href="/tce">▣ &nbsp;TCE-SP</a>
+    <a class="{% if request.path == '/audesp' %}ativo{% endif %}" href="/audesp">◫ &nbsp;AUDESP</a>
+    <a class="{% if request.path == '/alertas' %}ativo{% endif %}" href="/alertas">⚠ &nbsp;Alertas</a>
+    <a class="{% if request.path == '/calendario' %}ativo{% endif %}" href="/calendario">□ &nbsp;Calendário</a>
+    <div class="menu-label">Sistema</div>
+    <a href="/exportar">⇩ &nbsp;Exportar</a>
+    {% if session.get('perfil') == 'Administrador' %}<a class="{% if request.path == '/usuarios' %}ativo{% endif %}" href="/usuarios">♙ &nbsp;Usuários</a><a href="/status">◉ &nbsp;Status</a>{% endif %}
+    <a class="sair" href="/logout">↪ &nbsp;Sair</a>
+  </nav>
+  <div class="sidebar-footer">SP ÁGUAS • Sistema interno</div>
+</aside>
+<div class="main"><div class="topbar"><div class="breadcrumb">SP ÁGUAS / <span class="page-title">{{ titulo }}</span></div><div class="muted">{{ session.get('perfil','') }}</div></div><main class="content">{{ conteudo|safe }}</main></div>
+</div>
+{% else %}
+<div class="login-page">{{ conteudo|safe }}</div>
+{% endif %}
+</body></html>
 """
 
 
 def pagina(titulo, conteudo):
-	estilo_moderno = """
-	<style>
-	:root { --azul-escuro: #073b5c; --azul: #087e9f; --fundo: #f4f7f9; --borda: #dce6eb; --texto: #20333f; --suave: #71828d; --sombra: 0 10px 30px rgba(21, 55, 75, .08); }
-	body { background: var(--fundo); color: var(--texto); font-family: Inter, "Segoe UI", sans-serif; }
-	header { position: fixed; inset: 0 auto 0 0; width: 250px; min-height: 100vh; padding: 28px 16px; background: linear-gradient(180deg, #073b5c 0%, #087e9f 100%); box-shadow: 6px 0 24px rgba(7, 59, 92, .14); z-index: 10; }
-	.logo { padding: 8px 12px 28px; font-size: 21px; letter-spacing: .4px; }
-	header > div:not(.logo) { padding: 0 12px; color: rgba(255,255,255,.7); font-size: 12px; line-height: 1.5; }
-	.menu { display: flex; flex-direction: column; gap: 5px; margin-top: 24px; }
-	.menu a { margin: 0; padding: 11px 12px; border-radius: 9px; color: rgba(255,255,255,.86); font-size: 13px; transition: background .2s, transform .2s; }
-	.menu a:hover { background: rgba(255,255,255,.14); transform: translateX(3px); }
-	.container { max-width: none; min-height: 100vh; margin-left: 250px; padding: 38px 42px; }
-	.card, .metrica { border: 1px solid var(--borda); border-radius: 14px; box-shadow: var(--sombra); }
-	.card h1 { margin-top: 0; color: var(--azul-escuro); font-size: 27px; }
-	.card h2 { color: var(--azul-escuro); font-size: 18px; }
-	.grid { gap: 18px; }
-	.metrica { padding: 22px; }
-	.metrica h3 { text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
-	.metrica strong { color: var(--azul); font-size: 32px; }
-	input, select, textarea { border-color: var(--borda); background: #fbfdfe; border-radius: 8px; font-family: inherit; }
-	input:focus, select:focus, textarea:focus { outline: 0; border-color: var(--azul); box-shadow: 0 0 0 3px rgba(8,126,159,.14); background: #fff; }
-	button, .btn { border-radius: 8px; font-weight: 600; background: var(--azul); transition: transform .2s, box-shadow .2s, background .2s; }
-	button:hover, .btn:hover { background: #066b88; box-shadow: 0 5px 12px rgba(8,126,159,.2); transform: translateY(-1px); }
-	th { background: #f5f8fa; color: #60727d; font-size: 11px; text-transform: uppercase; letter-spacing: .45px; border-bottom: 1px solid var(--borda); }
-	td { padding: 13px 10px; }
-	.alerta { border-left: 4px solid transparent; box-shadow: 0 2px 8px rgba(21,55,75,.04); }
-	.vencido { border-left-color: #c62828; } .critico { border-left-color: #e66a00; } .proximo { border-left-color: #c18a05; } .normal { border-left-color: #2e7d32; }
-	.popup-alertas { display: none; position: fixed; inset: 0; z-index: 30; align-items: center; justify-content: center; padding: 20px; background: rgba(7, 30, 45, .48); }
-	.popup-alertas.visivel { display: flex; animation: aparecer .2s ease-out; }
-	.popup-alertas-conteudo { position: relative; width: min(520px, 100%); padding: 30px; border: 1px solid #f0d6a6; border-radius: 16px; background: #fffdf8; box-shadow: 0 18px 50px rgba(7, 30, 45, .25); }
-	.popup-alertas-conteudo h2 { margin: 0 0 8px; color: #7b3f00; }
-	.popup-alertas-conteudo ul { max-height: 230px; margin: 18px 0; padding-left: 20px; color: #4b3b2a; }
-	.popup-alertas-conteudo li { margin: 9px 0; }
-	.popup-alertas-conteudo li strong { color: #b3261e; }
-	.popup-alertas-conteudo li span { color: #786b5c; font-size: 13px; }
-	.popup-fechar { position: absolute; top: 10px; right: 12px; padding: 2px 9px; background: transparent; color: #6d6258; font-size: 27px; line-height: 1; }
-	.popup-fechar:hover { background: transparent; color: #2d2520; box-shadow: none; transform: none; }
-	.popup-icone { display: grid; width: 34px; height: 34px; margin-bottom: 12px; place-items: center; border-radius: 50%; background: #c62828; color: white; font-size: 22px; font-weight: bold; }
-	.popup-mais { margin-top: -8px; color: #786b5c; font-size: 13px; }
-	@keyframes aparecer { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
-	@media (max-width: 760px) { header { position: relative; width: 100%; min-height: auto; padding: 16px; } header > div:not(.logo) { padding: 0; } .logo { padding: 4px 0 14px; } .menu { flex-direction: row; flex-wrap: wrap; margin-top: 14px; } .menu a { padding: 8px 9px; } .container { margin-left: 0; padding: 20px 12px; } }
-	</style>
-	"""
-	return render_template_string(HTML_BASE, titulo=titulo, conteudo=estilo_moderno + conteudo + popup_alertas())
+    return render_template_string(HTML_BASE, titulo=titulo, conteudo=conteudo + popup_alertas())
 
 
 def acesso_login():
@@ -1067,11 +1079,11 @@ def login():
 	if request.method == "POST":
 		user = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (request.form["usuario"].strip(),)).fetchone(); conn.close()
 		if not user or not user["ativo"] or not user["aprovado"] or not bcrypt.checkpw(request.form["senha"].encode(), user["senha_hash"].encode()):
-			return pagina("Login", '<div class="card" style="max-width:420px;margin:auto"><div class="erro">Usuário ou senha inválidos, ou acesso ainda não liberado.</div><br><a class="btn" href="/">Voltar</a></div>')
+			return pagina("Login", '<div class="login-card"><div class="login-brand"><div class="brand-mark">SA</div><h1>SP ÁGUAS</h1><p>Gestão de Processos e Prazos</p></div><div class="erro">Usuário ou senha inválidos, ou acesso ainda não liberado.</div><a class="btn" style="width:100%" href="/">Voltar ao login</a></div>')
 		session.update(usuario_id=user["id"], nome=user["nome"], usuario=user["usuario"], perfil=user["perfil"])
 		return redirect(url_for("sistema"))
 	conn.close()
-	return pagina("Login", '<div class="card" style="max-width:420px;margin:70px auto"><h1>SP ÁGUAS</h1><p>Gestão de Processos e Prazos</p><form method="post"><label>Usuário</label><input name="usuario" required><label>Senha</label><input type="password" name="senha" required><button style="width:100%">ENTRAR</button></form><hr><a href="/cadastro" class="btn">Criar minha conta</a></div>')
+	return pagina("Login", '<div class="login-card"><div class="login-brand"><div class="brand-mark">SA</div><h1>SP ÁGUAS</h1><p>Gestão de Processos e Prazos</p></div><form method="post"><label>Usuário</label><input name="usuario" autocomplete="username" required><label>Senha</label><input type="password" name="senha" autocomplete="current-password" required><button style="width:100%;margin-top:4px">Entrar</button></form><div style="text-align:center;margin-top:18px"><span class="muted">Ainda não possui acesso?</span><br><a href="/cadastro" class="btn btn-outline" style="margin-top:9px">Criar minha conta</a></div></div>')
 
 
 @app.route("/cadastro", methods=["GET", "POST"])
@@ -1100,7 +1112,7 @@ def cadastro():
 			except Exception as exc:
 				erro = f"Não foi possível concluir o cadastro: {exc}"
 		return pagina("Cadastro", f'<div class="card"><div class="erro">{html.escape(erro)}</div><a href="/cadastro" class="btn">Voltar</a></div>')
-	return pagina("Cadastro", '<div class="card" style="max-width:550px;margin:auto"><h2>Criar acesso ao sistema</h2><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>E-mail</label><input type="email" name="email" required><label>Senha</label><input type="password" name="senha" minlength="8" required><label>Confirmar senha</label><input type="password" name="confirmar" minlength="8" required><button>Criar minha conta</button></form></div>')
+	return pagina("Cadastro", '<div class="login-card"><div class="login-brand"><div class="brand-mark">SA</div><h1>Criar acesso</h1><p>Cadastre seus dados para solicitar acesso ao SP ÁGUAS.</p></div><form method="post"><label>Nome completo</label><input name="nome" required><label>Usuário</label><input name="usuario" required><label>E-mail</label><input type="email" name="email" required><label>Senha</label><input type="password" name="senha" minlength="8" required><label>Confirmar senha</label><input type="password" name="confirmar" minlength="8" required><button style="width:100%">Criar minha conta</button></form><div style="text-align:center;margin-top:16px"><a href="/" class="btn btn-outline">Voltar ao login</a></div></div>')
 
 
 def ler_demanda_form():
@@ -1125,16 +1137,28 @@ def validar_demanda(valores):
 
 @app.route("/sistema")
 def sistema():
-	if (resposta := acesso_login()): return resposta
-	conn = conectar(); registros = conn.execute("SELECT * FROM demandas ORDER BY prazo_fatal").fetchall(); conn.close()
-	contagens = {"total": len(registros), "tce": sum(d["origem"] == "TCE-SP" for d in registros), "audesp": sum(d["origem"] == "AUDESP" for d in registros), "concluidas": sum(d["situacao"] == "Concluído" for d in registros), "VENCIDO": 0, "CRÍTICO": 0, "PRÓXIMO": 0, "NORMAL": 0}
-	for d in registros:
-		if d["situacao"] != "Concluído": contagens[calcular_prazos(d["prazo_area"], d["prazo_fatal"])["status"]] += 1
-	cards = [("Total de demandas", "total"), ("TCE-SP", "tce"), ("AUDESP", "audesp"), ("Vencidas", "VENCIDO"), ("Críticas", "CRÍTICO"), ("Próximas", "PRÓXIMO"), ("Normais", "NORMAL"), ("Concluídas", "concluidas")]
-	html = f'<h1>Dashboard</h1><p>Bem-vindo, <strong>{session["nome"]}</strong>. Perfil: <strong>{session["perfil"]}</strong></p><div class="grid">' + ''.join(f'<div class="metrica"><h3>{nome}</h3><strong>{contagens[chave]}</strong></div>' for nome, chave in cards) + '</div><div class="card"><h2>Próximos prazos</h2>'
-	proximos = sorted(((d, calcular_prazos(d["prazo_area"], d["prazo_fatal"])) for d in registros if d["situacao"] != "Concluído" and calcular_prazos(d["prazo_area"], d["prazo_fatal"])["dias_fatal"] is not None), key=lambda item: item[1]["dias_fatal"])
-	html += ''.join(f'<div class="alerta {p["status"].lower()}"><strong>{d["numero_processo"] or "Sem número"}</strong> — {d["assunto"]}<br>Prazo fatal: <strong>{data_br(d["prazo_fatal"])}</strong> | Dias restantes: <strong>{p["dias_fatal"]}</strong> | <a href="/editar/{d["id"]}">Editar</a></div>' for d, p in proximos[:10]) + '</div>'
-	return pagina("Dashboard", html)
+    if (resposta := acesso_login()): return resposta
+    conn = conectar(); registros = conn.execute("SELECT * FROM demandas ORDER BY prazo_fatal").fetchall(); conn.close()
+    contagens = {"total": len(registros), "tce": 0, "audesp": 0, "concluidas": 0, "VENCIDO": 0, "CRÍTICO": 0, "PRÓXIMO": 0, "NORMAL": 0}
+    calculados = []
+    for d in registros:
+        if d["origem"] == "TCE-SP": contagens["tce"] += 1
+        if d["origem"] == "AUDESP": contagens["audesp"] += 1
+        if d["situacao"] == "Concluído": contagens["concluidas"] += 1
+        p = calcular_prazos(d["prazo_area"], d["prazo_fatal"]); calculados.append((d, p))
+        if d["situacao"] != "Concluído": contagens[p["status"]] += 1
+    contagens["ativos"] = sum(d["situacao"] != "Concluído" for d in registros)
+    ativos = [item for item in calculados if item[0]["situacao"] != "Concluído" and item[1]["dias_fatal"] is not None]; ativos.sort(key=lambda item: item[1]["dias_fatal"])
+    cards = [("Total de demandas", "total"), ("Em andamento", "ativos"), ("Vencidas", "VENCIDO"), ("Próximas", "PRÓXIMO")]
+    cards_html = ''.join(f'<div class="metrica"><h3>{nome}</h3><strong>{contagens[chave]}</strong></div>' for nome, chave in cards)
+    linhas = ''
+    for d, p in ativos[:8]:
+        classe = {"VENCIDO":"badge-vencido", "CRÍTICO":"badge-critico", "PRÓXIMO":"badge-proximo", "NORMAL":"badge-normal"}.get(p["status"], "badge-info")
+        dias = p["dias_fatal"]; texto_dias = "vencido" if dias < 0 else "hoje" if dias == 0 else f"{dias} dia(s)"
+        linhas += f'<div class="alerta {p["status"].lower()}"><div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap"><div><span class="badge {classe}">{p["status"]}</span><div class="table-title" style="margin-top:7px">{html.escape(d["numero_processo"] or "Sem número")} · {html.escape(d["assunto"][:100])}</div><div class="muted" style="margin-top:3px">Prazo fatal: <strong>{data_br(d["prazo_fatal"])}</strong> · {texto_dias}</div></div><a class="btn btn-outline" href="/editar/{d['id']}">Abrir demanda</a></div></div>'
+    if not linhas: linhas = '<div class="empty"><strong>Nenhum prazo pendente</strong>Todas as demandas estão concluídas ou sem prazo fatal.</div>'
+    html_dashboard = f'<div class="page-head"><div><h1>Dashboard</h1><p>Visão geral das demandas e dos prazos do SP ÁGUAS.</p></div><div class="actions"><a class="btn" href="/nova-demanda">＋ Nova demanda</a><a class="btn btn-outline" href="/demandas">Ver todas</a></div></div><div class="grid">{cards_html}</div><div class="card"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap"><div><h2>Próximos prazos</h2><p class="muted" style="margin:0">Demandas que exigem acompanhamento prioritário.</p></div><div class="stat-strip"><span class="pill">TCE-SP: {contagens["tce"]}</span><span class="pill">AUDESP: {contagens["audesp"]}</span><span class="pill">Concluídas: {contagens["concluidas"]}</span></div></div>{linhas}</div>'
+    return pagina("Dashboard", html_dashboard)
 
 
 @app.route("/nova-demanda", methods=["GET", "POST"])
@@ -1155,20 +1179,34 @@ def nova_demanda():
 
 
 def formulario(demanda=None):
-	valor = lambda nome: (demanda[nome] or "") if demanda else ""
-	return f'<div class="card"><h1>{"Editar demanda" if demanda else "Nova demanda"}</h1><form method="post"><div class="grid"><div><label>Número do processo</label><input name="numero" value="{valor("numero_processo")}"></div><div><label>Origem</label><select name="origem"><option>TCE-SP</option><option>AUDESP</option><option>Outro</option></select></div><div><label>Data de recebimento</label><input type="date" name="data_recebimento" value="{valor("data_recebimento")}"></div><div><label>Área</label><input name="area" value="{valor("area")}"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}"></div><div><label>Prioridade</label><select name="prioridade"><option>Normal</option><option>Alta</option><option>Urgente</option></select></div><div><label>Prazo da área</label><input type="date" name="prazo_area" value="{valor("prazo_area")}"></div><div><label>Prazo fatal</label><input type="date" name="prazo_fatal" value="{valor("prazo_fatal")}" required></div><div><label>Situação</label><select name="situacao"><option>Aberto</option><option>Em análise</option><option>Aguardando área</option><option>Aguardando documento</option><option>Respondido</option><option>Concluído</option></select></div></div><label>Assunto</label><textarea name="assunto" required>{valor("assunto")}</textarea><label>Observações</label><textarea name="observacoes">{valor("observacoes")}</textarea><button>Salvar</button> <a class="btn btn-cinza" href="/demandas">Cancelar</a></form></div>'
+    valor = lambda nome: html.escape(str((demanda[nome] or "") if demanda else ""), quote=True)
+    escolhido = lambda nome, opcao: "selected" if valor(nome) == opcao else ""
+    titulo = "Editar demanda" if demanda else "Nova demanda"
+    subtitulo = "Atualize os dados e mantenha o histórico da demanda." if demanda else "Cadastre uma nova demanda e acompanhe seus prazos em um único lugar."
+    situacoes = ("Aberto","Em análise","Aguardando área","Aguardando documento","Respondido","Concluído")
+    prioridades = ("Normal","Alta","Urgente")
+    situacao_options = ''.join(f'<option {escolhido("situacao", o)}>{o}</option>' for o in situacoes)
+    prioridade_options = ''.join(f'<option {escolhido("prioridade", o)}>{o}</option>' for o in prioridades)
+    historico_link = f'<a class="btn btn-outline" href="/historico/{demanda["id"]}">Ver histórico</a>' if demanda else ''
+    return f'<div class="page-head"><div><h1>{titulo}</h1><p>{subtitulo}</p></div><a class="btn btn-outline" href="/demandas">← Voltar</a></div><div class="card"><form method="post"><div class="form-section"><h3>Identificação</h3><div class="form-grid"><div><label>Número do processo</label><input name="numero" value="{valor("numero_processo")}" placeholder="Ex.: TC-000000/000/00"></div><div><label>Origem</label><select name="origem"><option {escolhido("origem","TCE-SP")}>TCE-SP</option><option {escolhido("origem","AUDESP")}>AUDESP</option><option {escolhido("origem","Outro")}>Outro</option></select></div><div class="full"><label>Assunto</label><textarea name="assunto" required placeholder="Descreva de forma objetiva o assunto da demanda">{valor("assunto")}</textarea></div></div></div><div class="form-section"><h3>Responsabilidade</h3><div class="form-grid"><div><label>Área</label><input name="area" value="{valor("area")}" placeholder="Área responsável"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}" placeholder="Nome do responsável"></div></div></div><div class="form-section"><h3>Prazos e classificação</h3><div class="form-grid three"><div><label>Data de recebimento</label><input type="date" name="data_recebimento" value="{valor("data_recebimento")}"></div><div><label>Prazo da área</label><input type="date" name="prazo_area" value="{valor("prazo_area")}"></div><div><label>Prazo fatal</label><input type="date" name="prazo_fatal" value="{valor("prazo_fatal") }" required></div><div><label>Situação</label><select name="situacao">{situacao_options}</select></div><div><label>Prioridade</label><select name="prioridade">{prioridade_options}</select></div></div></div><div class="form-section"><h3>Observações</h3><textarea name="observacoes" placeholder="Informações complementares, providências ou observações internas">{valor("observacoes")}</textarea></div><div class="form-actions"><button type="submit">✓ {"Salvar alterações" if demanda else "Cadastrar demanda"}</button><a class="btn btn-cinza" href="/demandas">Cancelar</a>{historico_link}</div></form></div>'
 
 
 @app.route("/demandas")
 def demandas():
-	if (resposta := acesso_login()): return resposta
-	busca, origem = request.args.get("busca", "").strip(), request.args.get("origem", "")
-	conn = conectar(); sql = "SELECT * FROM demandas WHERE 1=1"; params = []
-	if busca: sql += " AND (numero_processo LIKE ? OR assunto LIKE ? OR area LIKE ? OR responsavel LIKE ?)"; params += [f"%{busca}%"] * 4
-	if origem: sql += " AND origem = ?"; params.append(origem)
-	registros = conn.execute(sql + " ORDER BY prazo_fatal", params).fetchall(); conn.close()
-	linhas = ''.join(f'<tr><td>{d["id"]}</td><td>{d["numero_processo"] or "-"}</td><td>{d["origem"]}</td><td>{d["assunto"]}</td><td>{d["area"] or "-"}</td><td>{d["responsavel"] or "-"}</td><td>{data_br(d["prazo_fatal"])}</td><td>{d["situacao"]}</td><td><a class="btn" href="/editar/{d["id"]}">Editar</a></td></tr>' for d in registros)
-	return pagina("Demandas", f'<div class="card"><h1>Demandas</h1><form method="get"><input name="busca" value="{busca}" placeholder="Processo, assunto, área..."><button>Pesquisar</button></form></div><div class="card" style="overflow-x:auto"><table><tr><th>ID</th><th>Processo</th><th>Origem</th><th>Assunto</th><th>Área</th><th>Responsável</th><th>Prazo fatal</th><th>Situação</th><th>Ações</th></tr>{linhas}</table></div>')
+    if (resposta := acesso_login()): return resposta
+    busca, origem = request.args.get("busca", "").strip(), request.args.get("origem", "")
+    conn = conectar(); sql = "SELECT * FROM demandas WHERE 1=1"; params = []
+    if busca: sql += " AND (numero_processo LIKE ? OR assunto LIKE ? OR area LIKE ? OR responsavel LIKE ?)"; params += [f"%{busca}%"] * 4
+    if origem: sql += " AND origem = ?"; params.append(origem)
+    registros = conn.execute(sql + " ORDER BY prazo_fatal", params).fetchall(); conn.close()
+    linhas = ''
+    for d in registros:
+        p = calcular_prazos(d["prazo_area"], d["prazo_fatal"]); classe = {"VENCIDO":"badge-vencido","CRÍTICO":"badge-critico","PRÓXIMO":"badge-proximo","NORMAL":"badge-normal"}.get(p["status"],"badge-concluido") if d["situacao"] != "Concluído" else "badge-concluido"; status = "Concluído" if d["situacao"] == "Concluído" else p["status"]
+        linhas += f'<tr><td><span class="table-title">{html.escape(d["numero_processo"] or "Sem número")}</span></td><td>{html.escape(d["origem"] or "-")}</td><td>{html.escape(d["assunto"] or "-")}</td><td>{html.escape(d["area"] or "-")}</td><td>{html.escape(d["responsavel"] or "-")}</td><td>{data_br(d["prazo_fatal"])}</td><td><span class="badge {classe}">{status}</span></td><td><a class="btn btn-outline" href="/editar/{d['id']}">Abrir</a></td></tr>'
+    if not linhas: linhas = '<tr><td colspan="8"><div class="empty"><strong>Nenhuma demanda encontrada</strong>Ajuste os filtros ou cadastre uma nova demanda.</div></td></tr>'
+    origem_opts = ''.join(f'<option value="{o}" {"selected" if origem==o else ""}>{o}</option>' for o in ("TCE-SP","AUDESP","Outro"))
+    conteudo = f'<div class="page-head"><div><h1>Demandas</h1><p>Pesquise, filtre e acompanhe todas as demandas cadastradas.</p></div><a class="btn" href="/nova-demanda">＋ Nova demanda</a></div><div class="card"><div class="toolbar"><form method="get"><input name="busca" value="{html.escape(busca, quote=True)}" placeholder="Pesquisar por processo, assunto, área ou responsável"><button>Pesquisar</button></form><div class="toolbar-actions"><select name="origem"><option value="">Todas as origens</option>{origem_opts}</select><a class="btn btn-outline" href="/demandas">Limpar</a></div></div></div><div class="card"><div class="table-wrap"><table><thead><tr><th>Processo</th><th>Origem</th><th>Assunto</th><th>Área</th><th>Responsável</th><th>Prazo fatal</th><th>Status</th><th>Ações</th></tr></thead><tbody>{linhas}</tbody></table></div></div>'
+    return pagina("Demandas", conteudo)
 
 
 @app.route("/editar/<int:id>", methods=["GET", "POST"])
@@ -1225,13 +1263,16 @@ def excluir(id):
 
 @app.route("/alertas")
 def alertas():
-	if (resposta := acesso_login()): return resposta
-	conn = conectar(); registros = conn.execute("SELECT * FROM demandas WHERE situacao != 'Concluído' ORDER BY prazo_fatal").fetchall(); conn.close()
-	html = '<div class="card"><h1>Alertas de prazos</h1>'
-	for d in registros:
-		p = calcular_prazos(d["prazo_area"], d["prazo_fatal"])
-		if p["status"] != "NORMAL": html += f'<div class="alerta {p["status"].lower()}"><strong>{p["status"]}</strong> — {d["numero_processo"] or "-"} — {d["assunto"]}<br>Prazo fatal: {data_br(d["prazo_fatal"])} | Dias restantes: {p["dias_fatal"]} <a class="btn" href="/editar/{d["id"]}">Abrir</a></div>'
-	return pagina("Alertas", html + '</div>')
+    if (resposta := acesso_login()): return resposta
+    conn = conectar(); registros = conn.execute("SELECT * FROM demandas WHERE situacao != 'Concluído' ORDER BY prazo_fatal").fetchall(); conn.close()
+    itens = []
+    for d in registros:
+        p = calcular_prazos(d["prazo_area"], d["prazo_fatal"])
+        if p["status"] != "NORMAL":
+            classe = {"VENCIDO":"badge-vencido","CRÍTICO":"badge-critico","PRÓXIMO":"badge-proximo"}.get(p["status"],"badge-info"); dias=p["dias_fatal"]; texto="prazo vencido" if dias is not None and dias<0 else "vence hoje" if dias==0 else f"vence em {dias} dia(s)"
+            itens.append(f'<div class="alerta {p["status"].lower()}"><div style="display:flex;justify-content:space-between;gap:15px;align-items:center;flex-wrap:wrap"><div><span class="badge {classe}">{p["status"]}</span><div class="table-title" style="margin-top:7px">{html.escape(d["numero_processo"] or "Sem número")} · {html.escape(d["assunto"])}</div><div class="muted">Prazo fatal: <strong>{data_br(d["prazo_fatal"])}</strong> · {texto}</div></div><a class="btn" href="/editar/{d['id']}">Abrir demanda</a></div></div>')
+    if not itens: itens=['<div class="empty"><strong>Sem alertas no momento</strong>Não há demandas vencidas, críticas ou próximas do prazo.</div>']
+    return pagina("Alertas", f'<div class="page-head"><div><h1>Alertas de prazos</h1><p>Priorize as demandas que exigem ação ou acompanhamento imediato.</p></div></div><div class="card">{"".join(itens)}</div>')
 
 
 @app.route("/usuarios", methods=["GET", "POST"])
@@ -1271,6 +1312,17 @@ def usuarios():
 	conn = conectar(); lista = conn.execute("SELECT * FROM usuarios ORDER BY nome").fetchall(); conn.close()
 	linhas = ''.join(f'<tr><td>{u["nome"]}</td><td>{u["usuario"]}</td><td>{u["email"] or "-"}</td><td>{u["perfil"]}</td><td>{"Aprovado" if u["aprovado"] else "Pendente"}</td><td>{"Ativo" if u["ativo"] else "Bloqueado"}</td><td><form method="post"><input type="hidden" name="usuario_id" value="{u["id"]}"><input type="hidden" name="acao" value="{"bloquear" if u["ativo"] else "ativar"}"><button>{"Bloquear" if u["ativo"] else "Ativar"}</button></form></td></tr>' for u in lista)
 	return pagina("Usuários", f'<div class="card"><h1>Usuários</h1><table><tr><th>Nome</th><th>Usuário</th><th>E-mail</th><th>Perfil</th><th>Aprovação</th><th>Status</th><th>Ação</th></tr>{linhas}</table></div>')
+
+
+@app.route("/historico/<int:id>")
+def historico(id):
+    if (resposta := acesso_login()): return resposta
+    conn = conectar(); demanda = conn.execute("SELECT * FROM demandas WHERE id = ?", (id,)).fetchone()
+    if not demanda: conn.close(); return "Demanda não encontrada.", 404
+    registros = conn.execute("SELECT h.*, u.nome AS usuario_nome FROM historico h LEFT JOIN usuarios u ON u.id = h.usuario_id WHERE h.demanda_id = ? ORDER BY h.data_hora DESC, h.id DESC", (id,)).fetchall(); conn.close()
+    itens=''.join(f'<div class="alerta normal"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><strong>{html.escape(r["acao"] or "ATUALIZAÇÃO")}</strong><span class="muted">{html.escape(str(r["data_hora"] or ""))}</span></div><div style="margin-top:6px">{html.escape(r["descricao"] or "")}</div><div class="muted" style="margin-top:5px">Por: {html.escape(r["usuario_nome"] or "Usuário")}</div></div>' for r in registros)
+    if not itens: itens='<div class="empty"><strong>Sem movimentações</strong>Esta demanda ainda não possui registros no histórico.</div>'
+    return pagina("Histórico", f'<div class="page-head"><div><h1>Histórico da demanda</h1><p>{html.escape(demanda["numero_processo"] or "Sem número")} · {html.escape(demanda["assunto"])}</p></div><a class="btn btn-outline" href="/editar/{id}">← Voltar à demanda</a></div><div class="card">{itens}</div>')
 
 
 def tabela_por_origem(titulo, origem):
@@ -1468,109 +1520,92 @@ def health():
 
 @app.route("/diagnostico-sync")
 def diagnostico_sync():
-	"""Diagnostica a cadeia banco em memória -> XLSX -> SharePoint."""
-	if (resposta := acesso_login()):
-		return resposta
-	if not administrador():
-		return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
+    """Diagnóstico somente leitura da cadeia aplicação -> XLSX remoto.
 
-	inicio = datetime.now()
-	resultado = {"status": "INICIANDO", "arquivo_configurado": SHAREPOINT_FILE_PATH, "etapas": []}
+    Esta rota nunca reconstrói nem envia o workbook ao SharePoint/OneDrive.
+    """
+    if (resposta := acesso_login()):
+        return resposta
+    if not administrador():
+        return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
 
-	def etapa(numero, nome, status, mensagem, **dados):
-		resultado["etapas"].append({"numero": numero, "etapa": nome, "status": status, "mensagem": mensagem, **dados})
+    inicio = datetime.now()
+    config = _diagnostico_configuracao_sharepoint()
+    resultado = {
+        "status": "INICIANDO",
+        "somente_leitura": True,
+        "arquivo_configurado": SHAREPOINT_FILE_PATH,
+        "etapas": [],
+    }
 
-	def falha(numero, nome, erro):
-		etapa(numero, nome, "ERRO", str(erro))
-		resultado["status"] = "FALHA"
-		return jsonify(resultado), 500
+    def etapa(numero, nome, status, mensagem, **dados):
+        item = {"numero": numero, "etapa": nome, "status": status, "mensagem": mensagem}
+        item.update(dados)
+        resultado["etapas"].append(item)
 
-	try:
-		if not _onedrive_configurado():
-			raise RuntimeError("Integração SharePoint desabilitada ou incompleta.")
-		etapa(1, "Configuração", "OK", "Configuração do Microsoft Graph está preenchida.", caminho=SHAREPOINT_FILE_PATH)
-	except Exception as erro:
-		return falha(1, "Configuração", erro)
+    if not config["configurada"]:
+        etapa(1, "Configuração", "ERRO", "Integração Microsoft Graph desabilitada ou incompleta.", faltantes=config["faltantes"])
+        resultado.update(status="FALHA_CONFIGURACAO", mensagem_final="Preencha as variáveis do Microsoft Graph no Vercel e faça um novo Deploy.")
+        return jsonify(resultado), 500
+    etapa(1, "Configuração", "OK", "Configuração do Microsoft Graph está preenchida.", caminho=SHAREPOINT_FILE_PATH)
 
-	try:
-		token = _onedrive_token()
-		etapa(2, "Autenticação Microsoft Graph", "OK", "Access token obtido com sucesso.")
-	except Exception as erro:
-		return falha(2, "Autenticação Microsoft Graph", erro)
+    try:
+        token = _onedrive_token()
+        etapa(2, "Autenticação Microsoft Graph", "OK", "Access token obtido. O segredo não é exibido.")
+    except Exception as erro:
+        etapa(2, "Autenticação Microsoft Graph", "ERRO", str(erro))
+        resultado.update(status="FALHA_AUTENTICACAO", mensagem_final="Verifique credenciais, permissões Graph e consentimento administrativo.")
+        return jsonify(resultado), 500
 
-	try:
-		meta_antes = _graph_metadata_diagnostico()
-		etapa(3, "Arquivo remoto", "OK", "Microsoft Graph encontrou o arquivo.", nome=meta_antes.get("name"), id=meta_antes.get("id"), tamanho_bytes=meta_antes.get("size"), etag=meta_antes.get("eTag"))
-	except Exception as erro:
-		return falha(3, "Arquivo remoto", erro)
+    try:
+        pasta, arquivo = _resolver_arquivo_graph(token)
+        etapa(3, "Localização", "OK", "Pasta e arquivo localizados pelo caminho configurado.", pasta_id=pasta.get("id"), arquivo_id=arquivo.get("id"), nome=arquivo.get("name"))
+    except Exception as erro:
+        etapa(3, "Localização", "ERRO", str(erro))
+        resultado.update(status="FALHA_LOCALIZACAO", mensagem_final="Verifique a pasta SP_AGUAS e o nome exato do arquivo no OneDrive corporativo.")
+        return jsonify(resultado), 500
 
-	try:
-		remoto_antes = _graph_download_diagnostico()
-		hash_antes = hashlib.sha256(remoto_antes).hexdigest()
-		etapa(4, "Download do Excel remoto", "OK", "Arquivo remoto baixado.", tamanho_bytes=len(remoto_antes), sha256=hash_antes)
-	except Exception as erro:
-		return falha(4, "Download do Excel remoto", erro)
+    try:
+        usuario = quote(ONEDRIVE_USER, safe="")
+        if SHAREPOINT_SITE_ID and SHAREPOINT_DRIVE_ID:
+            url_conteudo = _onedrive_url()
+        else:
+            url_conteudo = f"https://graph.microsoft.com/v1.0/users/{usuario}/drive/items/{quote(arquivo['id'], safe='')}/content"
+        with urlopen(Request(url_conteudo, headers={"Authorization": f"Bearer {token}"}), timeout=60) as resposta:
+            conteudo = resposta.read()
+            status_http = resposta.status
+        etapa(4, "Download", "OK", "Arquivo remoto baixado sem qualquer alteração.", status_http=status_http, tamanho_bytes=len(conteudo), sha256=hashlib.sha256(conteudo).hexdigest())
+    except Exception as erro:
+        etapa(4, "Download", "ERRO", str(erro))
+        resultado.update(status="FALHA_DOWNLOAD", mensagem_final="O Graph encontrou o arquivo, mas não conseguiu baixá-lo.")
+        return jsonify(resultado), 500
 
-	try:
-		workbook = load_workbook(io.BytesIO(remoto_antes), read_only=True, data_only=True)
-		abas = list(workbook.sheetnames)
-		faltantes = set(TABELAS_EXCEL) - set(abas)
-		contagens_remotas = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
-		workbook.close()
-		if faltantes:
-			raise RuntimeError("Faltam as abas: " + ", ".join(sorted(faltantes)))
-		etapa(5, "Estrutura do Excel remoto", "OK", "XLSX válido.", abas=abas, contagens=contagens_remotas)
-	except Exception as erro:
-		return falha(5, "Estrutura do Excel remoto", erro)
+    try:
+        workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+        abas = list(workbook.sheetnames)
+        contagens = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
+        workbook.close()
+        faltantes = [aba for aba in TABELAS_EXCEL if aba not in abas]
+        if faltantes:
+            raise RuntimeError("Faltam as abas obrigatórias: " + ", ".join(faltantes))
+        etapa(5, "Estrutura do Excel", "OK", "XLSX válido e abas obrigatórias encontradas.", abas=abas, contagens_remotas=contagens)
+    except Exception as erro:
+        etapa(5, "Estrutura do Excel", "ERRO", str(erro))
+        resultado.update(status="FALHA_ESTRUTURA_EXCEL", mensagem_final="O arquivo remoto não possui a estrutura esperada pelo sistema.")
+        return jsonify(resultado), 500
 
-	try:
-		conn = conectar()
-		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-		etapa(6, "Dados da aplicação", "OK", "Contagens obtidas do banco em memória.", contagens=contagens, contagens_remotas=contagens_remotas)
-	except Exception as erro:
-		return falha(6, "Dados da aplicação", erro)
+    try:
+        conn = conectar()
+        contagens_locais = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+        conn.close()
+        etapa(6, "Dados carregados", "OK", "Dados da aplicação disponíveis em memória.", contagens_locais=contagens_locais, contagens_remotas=contagens)
+    except Exception as erro:
+        etapa(6, "Dados carregados", "ERRO", str(erro))
+        resultado.update(status="FALHA_DADOS", mensagem_final="Não foi possível validar os dados carregados pela aplicação.")
+        return jsonify(resultado), 500
 
-	try:
-		workbook = Workbook()
-		workbook.remove(workbook.active)
-		for tabela, colunas in TABELAS_EXCEL.items():
-			planilha = workbook.create_sheet(tabela)
-			planilha.append(list(colunas))
-			for registro in conn.execute(f"SELECT {', '.join(colunas)} FROM {tabela} ORDER BY id"):
-				planilha.append([registro[coluna] for coluna in colunas])
-		memoria = io.BytesIO()
-		workbook.save(memoria)
-		arquivo_gerado = memoria.getvalue()
-		hash_gerado = hashlib.sha256(arquivo_gerado).hexdigest()
-		etapa(7, "Geração do XLSX", "OK", "XLSX reconstruído pela aplicação.", tamanho_bytes=len(arquivo_gerado), sha256=hash_gerado)
-	except Exception as erro:
-		return falha(7, "Geração do XLSX", erro)
-
-	try:
-		status_put = _graph_upload_diagnostico(arquivo_gerado, etag=meta_antes.get("eTag"))
-		if status_put not in (200, 201):
-			raise RuntimeError(f"Microsoft Graph retornou HTTP {status_put}.")
-		etapa(8, "Gravação no SharePoint", "OK", "XLSX gerado enviado ao arquivo remoto.", http_status=status_put)
-	except Exception as erro:
-		return falha(8, "Gravação no SharePoint", erro)
-
-	try:
-		remoto_depois = _graph_download_diagnostico()
-		hash_depois = hashlib.sha256(remoto_depois).hexdigest()
-		if hash_depois != hash_gerado:
-			raise RuntimeError("O arquivo remoto ficou diferente do XLSX enviado.")
-		etapa(9, "Confirmação da persistência", "OK", "SHA-256 do arquivo remoto coincide com o arquivo enviado.", sha256=hash_depois)
-	except Exception as erro:
-		return falha(9, "Confirmação da persistência", erro)
-
-	try:
-		meta_depois = _graph_metadata_diagnostico()
-		etapa(10, "Metadados finais", "OK", "Metadados consultados após a gravação.", tamanho_bytes=meta_depois.get("size"), etag=meta_depois.get("eTag"))
-	except Exception as erro:
-		etapa(10, "Metadados finais", "AVISO", str(erro))
-
-	resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="A persistência do XLSX no SharePoint foi confirmada.")
-	return jsonify(resultado), 200
+    resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="Diagnóstico concluído em modo somente leitura. Nenhum upload ou alteração foi executado.")
+    return jsonify(resultado), 200
 
 
 @app.route("/logout")
