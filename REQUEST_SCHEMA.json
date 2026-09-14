@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "action": { "type": "string" },
+    "requestId": { "type": "string" },
+    "source": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "expectedVersion": { "type": "string" },
+    "snapshot": { "type": "object" }
+  },
+  "required": ["action", "requestId", "source", "timestamp"]
+}
