@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import io
 import html
 import hashlib
@@ -7,6 +7,7 @@ import os
 import socket
 import sqlite3
 import tempfile
+import time
 import uuid
 from threading import RLock
 from urllib.error import HTTPError, URLError
@@ -1121,18 +1122,83 @@ def _url_pdf_doe(data_iso):
     dt = datetime.strptime(data_iso, "%Y-%m-%d").date()
     return DOE_BASE_URL.format(ano=dt.year, mes=dt.month, data=dt.strftime("%Y-%m-%d"))
 
-def _buscar_doe_pdf(data_iso):
-    url = _url_pdf_doe(data_iso)
-    req = Request(url, headers={"User-Agent": "SP-AGUAS/1.0"})
-    try:
-        with urlopen(req, timeout=25) as resposta:
-            return resposta.read(), url
-    except HTTPError as exc:
-        if exc.code == 404:
-            raise RuntimeError("A edição PDF não foi encontrada para essa data. Verifique a data de publicação no DOE-TCESP.") from exc
-        raise RuntimeError(f"DOE-TCESP retornou HTTP {exc.code}.") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Não foi possível acessar o DOE-TCESP: {exc}") from exc
+def _download_doe_pdf(url):
+    """Baixa o PDF do DOE de forma resiliente.
+
+    Alguns endpoints do doe.tce.sp.gov.br encerram a resposta HTTP antes do
+    corpo completo quando acessados por ambientes serverless. Por isso usamos
+    requests, desabilitamos compressão e validamos o marcador final do PDF,
+    repetindo a operação quando o arquivo chega incompleto.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; SP-AGUAS/1.0)",
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "identity",
+        "Connection": "close",
+    }
+    ultimo_erro = None
+    for tentativa in range(1, 4):
+        try:
+            if requests is not None:
+                with requests.get(url, headers=headers, timeout=(10, 60), stream=True, allow_redirects=True) as r:
+                    if r.status_code == 404:
+                        raise FileNotFoundError("PDF não encontrado")
+                    r.raise_for_status()
+                    partes = []
+                    total = 0
+                    for bloco in r.iter_content(chunk_size=64 * 1024):
+                        if bloco:
+                            partes.append(bloco)
+                            total += len(bloco)
+                    conteudo = b"".join(partes)
+            else:
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=60) as resposta:
+                    conteudo = resposta.read()
+
+            if not conteudo.startswith(b"%PDF"):
+                raise RuntimeError("O servidor não retornou um PDF válido.")
+            if b"%%EOF" not in conteudo[-4096:]:
+                raise RuntimeError(f"O PDF foi recebido incompleto ({len(conteudo)} bytes).")
+            return conteudo
+        except FileNotFoundError as exc:
+            raise RuntimeError("A edição PDF não foi encontrada para essa data.") from exc
+        except Exception as exc:
+            ultimo_erro = exc
+            if tentativa < 3:
+                time.sleep(0.8 * tentativa)
+    raise RuntimeError(f"Não foi possível baixar o PDF completo do DOE-TCESP após 3 tentativas: {ultimo_erro}")
+
+def _buscar_doe_pdf(data_publicacao_iso):
+    """Localiza o PDF pela data de PUBLICAÇÃO, não apenas pela data do arquivo.
+
+    O TCESP informa no próprio PDF uma data de disponibilização e uma data de
+    publicação. O nome do arquivo usa a data de disponibilização. Assim, para
+    uma data de publicação informada pelo usuário, procuramos os dias anteriores
+    (incluindo a própria data) até encontrar a edição cuja publicação coincida.
+    """
+    dt = datetime.strptime(data_publicacao_iso, "%Y-%m-%d").date()
+    erros = []
+    for atraso in range(0, 8):
+        candidata = dt - timedelta(days=atraso)
+        url = _url_pdf_doe(candidata.strftime("%Y-%m-%d"))
+        try:
+            conteudo = _download_doe_pdf(url)
+            try:
+                leitor = PdfReader(io.BytesIO(conteudo))
+                cabecalho = " ".join((leitor.pages[0].extract_text() or "").split()) if leitor.pages else ""
+            except Exception:
+                cabecalho = ""
+            data_pub = re.search(r"(?:Data de publicação|Publicação)\s*[:—-]?\s*(\d{2}/\d{2}/\d{4})", cabecalho, re.I)
+            if data_pub:
+                publicada = datetime.strptime(data_pub.group(1), "%d/%m/%Y").date()
+                if publicada != dt:
+                    erros.append(f"{candidata}: publicação {publicada.strftime('%d/%m/%Y')}")
+                    continue
+            return conteudo, url, candidata.strftime("%Y-%m-%d")
+        except Exception as exc:
+            erros.append(f"{candidata}: {exc}")
+    raise RuntimeError("Não foi encontrada uma edição do DOE-TCESP correspondente à data de publicação informada. Verifique a data.\n" + "\n".join(erros[-3:]))
 
 def _processos_no_texto(texto):
     encontrados = []
@@ -1173,8 +1239,8 @@ def pesquisar_doe_tcesp():
     if palavra and _normalizar_pesquisa_doe(palavra) not in {_normalizar_pesquisa_doe(k) for k in DOE_KEYWORDS}:
         return jsonify({"erro":"Palavra-chave não cadastrada.","resultados":[]}),400
     try:
-        pdf,url=_buscar_doe_pdf(data_iso); resultados=_extrair_ocorrencias_doe(pdf,data_iso,url,palavra)
-        return jsonify({"data":data_iso,"url":url,"resultados":resultados})
+        pdf,url,data_arquivo=_buscar_doe_pdf(data_iso); resultados=_extrair_ocorrencias_doe(pdf,data_iso,url,palavra)
+        return jsonify({"data":data_iso,"data_arquivo":data_arquivo,"url":url,"resultados":resultados})
     except Exception as exc:
         return jsonify({"erro":str(exc),"resultados":[]}),502
 
