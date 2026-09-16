@@ -1,67 +1,67 @@
-# SP ÁGUAS — Sistema de Gestão de Demandas
+# SP ÁGUAS — Sistema de Gestão de Demandas TCESP e AUDESP
 
-## Versão 4 — Power Automate
+## Versão limpa — ETC + DOE-TCESP
 
-Esta versão mantém a modernização visual da versão 3, mas muda a arquitetura de persistência:
+Aplicação Flask para cadastro e acompanhamento de demandas, com suporte a número ETC e leitura de publicações do DOE-TCESP.
 
-`Vercel/Flask → Power Automate → Excel Online (Business) → SharePoint/OneDrive`
+### Persistência
 
-O Vercel **não acessa diretamente o Excel** e não usa credenciais Microsoft Graph.
+A versão atual **não utiliza Power Automate, Office Scripts, Microsoft Graph ou API do SharePoint**.
 
-### O que foi preservado
+Os dados são mantidos no SQLite local (`SQLITE_DATABASE`) e o sistema mantém uma cópia em Excel (`EXCEL_DATABASE`). As alterações feitas pela aplicação são gravadas no Excel e o SQLite é reconstruído para permanecer sincronizado.
 
-- Dashboard moderno com indicadores e próximos prazos.
-- Navegação lateral institucional e responsiva.
-- Formulário de demanda organizado por seções.
-- Badges de status e alertas de prazo.
-- Busca/filtro de demandas.
-- Histórico da demanda.
-- Login, cadastro e aprovação de usuários.
-- Exclusão e edição de demandas.
-- Diagnósticos somente leitura.
+> Em Vercel, o sistema de arquivos da função não é um banco persistente. Para produção com persistência entre deploys/execuções, será necessário conectar um banco externo (por exemplo, PostgreSQL/Supabase) em uma etapa posterior.
 
-### O que mudou
+### DOE-TCESP
 
-- Removidas as dependências de `TENANT_ID`, `CLIENT_ID` e `CLIENT_SECRET` no Vercel.
-- O Vercel envia apenas JSON ao fluxo Power Automate.
-- O Power Automate é responsável por acessar o arquivo corporativo.
-- Um Office Script lê/substitui os dados das abas `usuarios`, `demandas` e `historico`.
-- O fluxo deve controlar concorrência para evitar gravações simultâneas.
+Na tela **Nova demanda**, o usuário pode:
 
-### Arquivos importantes
+- colar o link direto de um PDF oficial do DOE-TCESP; ou
+- selecionar um PDF salvo no computador.
 
-- `app.py` — aplicação Flask.
-- `power_automate/OfficeScript_SP_AGUAS.ts` — script para o Excel.
-- `power_automate/FLUXO_POWER_AUTOMATE.md` — passo a passo para criar o fluxo.
-- `power_automate/REQUEST_SCHEMA.json` — esquema do POST recebido pelo fluxo.
+Quando o PDF é selecionado no computador, a leitura ocorre **diretamente no navegador com PDF.js**. Isso evita o limite de tamanho de requisição do Vercel e elimina o erro `Request Entity Too Large`.
 
-### Variáveis do Vercel
+Quando é informado um link, o servidor baixa o PDF somente de domínios oficiais do TCESP e extrai o texto com `pypdf`.
+
+O sistema procura as palavras-chave cadastradas, informa página e trecho, identifica números de processo quando encontrados e permite **Usar esta ocorrência** para preencher a demanda.
+
+### Dependências
+
+- Flask
+- openpyxl
+- bcrypt
+- pypdf
+- requests
+
+### Variáveis de ambiente
 
 ```text
-POWER_AUTOMATE_ENABLED=true
-POWER_AUTOMATE_URL=https://SEU-ENDPOINT-DO-POWER-AUTOMATE
-POWER_AUTOMATE_SECRET=UM_SEGREDO_FORTE_E_ALEATORIO
-POWER_AUTOMATE_TIMEOUT=90
-SECRET_KEY=UMA_CHAVE_FORTE_DO_FLASK
+SECRET_KEY=UMA_CHAVE_FORTE
+EXCEL_DATABASE=sp_aguas.xlsx
+SQLITE_DATABASE=sp_aguas.db
 ```
 
-Não configure `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID` ou `SHAREPOINT_CLIENT_SECRET` nesta versão.
+### Arquivos removidos da arquitetura
 
-### Observação
+Não fazem mais parte desta versão:
 
-O conector Excel Online (Business) suporta arquivos em OneDrive for Business e SharePoint. A Microsoft também documenta limitações para gravações concorrentes no mesmo workbook; por isso o fluxo deve ser configurado com concorrência controlada.
+- Power Automate
+- Office Script
+- endpoint de integração Power Automate
+- credenciais/segredos Microsoft Graph
+- rotinas de sincronização com SharePoint/OneDrive
 
+### Funcionalidades preservadas
 
-## Novas funcionalidades — ETC e DOE-TCESP
-
-A tela **Nova demanda** passou a permitir:
-- cadastro do **Número ETC correspondente** ao processo;
-- pesquisa da edição diária oficial do **DOE-TCESP** por data;
-- filtro por palavras-chave institucionais do SP ÁGUAS/DAEE e nomes informados;
-- visualização do trecho localizado e da página do PDF;
-- botão **Usar esta publicação**, que preenche os campos do DOE e, quando identificado, o número de processo;
-- armazenamento dos dados da publicação junto à demanda;
-- pesquisa das demandas também por ETC e conteúdo do DOE;
-- exportação dos dados ETC/DOE para Excel.
-
-A pesquisa utiliza o PDF oficial do DOE-TCESP no domínio `doe.tce.sp.gov.br`. A aplicação não baixa conteúdo de sites de terceiros para essa finalidade.
+- Login e cadastro de usuários
+- Aprovação de usuários
+- Dashboard
+- Cadastro/edição/exclusão de demandas
+- Número de processo
+- Número ETC correspondente
+- Prazos e alertas
+- Histórico
+- TCE-SP e AUDESP
+- Pesquisa de demandas
+- Exportação para Excel
+- Leitura de DOE-TCESP por PDF/link

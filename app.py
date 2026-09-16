@@ -10,10 +10,8 @@ import tempfile
 import time
 import uuid
 from threading import RLock
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
 from unicodedata import normalize as unicode_normalize
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 import bcrypt
 import requests
@@ -42,61 +40,14 @@ def _env(*nomes, default=""):
 	return default
 
 
-# Integração: Vercel chama um fluxo Power Automate; o fluxo é quem acessa o Excel.
-# Não são necessárias credenciais Microsoft Graph no Vercel.
-POWER_AUTOMATE_URL = _env("POWER_AUTOMATE_URL")
-POWER_AUTOMATE_SECRET = _env("POWER_AUTOMATE_SECRET")
-try:
-	POWER_AUTOMATE_TIMEOUT = int(_env("POWER_AUTOMATE_TIMEOUT", default="90"))
-except ValueError:
-	POWER_AUTOMATE_TIMEOUT = 90
-_raw_pa_enabled = _env("POWER_AUTOMATE_ENABLED")
-POWER_AUTOMATE_ENABLED = (_raw_pa_enabled.lower() in {"1", "true", "sim", "yes", "on"}) if _raw_pa_enabled else bool(POWER_AUTOMATE_URL and POWER_AUTOMATE_SECRET)
-
-# Mantidos somente como metadados do arquivo, sem autenticação no Vercel.
-SHAREPOINT_FOLDER_PATH = _env("SHAREPOINT_FOLDER_PATH", "ONEDRIVE_FOLDER_PATH", default="SP_AGUAS")
-SHAREPOINT_FILE_NAME = _env("SHAREPOINT_FILE_NAME", "ONEDRIVE_FILE_NAME", default="Sistema de Gestão de Demandas - SP Aguas.xlsx")
-SHAREPOINT_FILE_PATH = _env("SHAREPOINT_FILE_PATH", "ONEDRIVE_PATH", default=f"{SHAREPOINT_FOLDER_PATH.strip('/')}/{SHAREPOINT_FILE_NAME}")
-ONEDRIVE_PATH = SHAREPOINT_FILE_PATH
-
+# Persistência local: o sistema utiliza o arquivo Excel configurado em EXCEL_DATABASE.
+# No Vercel, defina EXCEL_DATABASE para um armazenamento persistente se desejar usar a aplicação
+# em produção; o sistema não depende de integração externa nem de Microsoft Graph.
 TABELAS_EXCEL = {
 	"usuarios": ("id", "nome", "usuario", "email", "senha_hash", "perfil", "ativo", "aprovado", "criado_em"),
 	"demandas": ("id", "numero_processo", "numero_etc", "origem", "assunto", "area", "responsavel", "data_recebimento", "prazo_area", "prazo_fatal", "situacao", "prioridade", "observacoes", "doe_data", "doe_edicao", "doe_secao", "doe_palavra_chave", "doe_publicacao", "doe_url", "criado_por", "criado_em", "atualizado_em"),
 	"historico": ("id", "demanda_id", "usuario_id", "acao", "descricao", "data_hora"),
 }
-
-
-def _diagnostico_configuracao_sharepoint():
-	"""Compatibilidade: o diagnóstico agora descreve a integração Power Automate."""
-	return _diagnostico_configuracao_power_automate()
-
-
-def _power_automate_configurado():
-	"""Indica se o Vercel está configurado para falar somente com o Power Automate."""
-	return bool(POWER_AUTOMATE_ENABLED and POWER_AUTOMATE_URL)
-
-
-def _diagnostico_configuracao_power_automate():
-	itens = {
-		"POWER_AUTOMATE_ENABLED": {"configurado": bool(POWER_AUTOMATE_ENABLED), "obrigatorio": True, "valor_seguro": "true" if POWER_AUTOMATE_ENABLED else "false"},
-		"POWER_AUTOMATE_URL": {"configurado": bool(POWER_AUTOMATE_URL), "obrigatorio": True, "valor_seguro": "preenchido" if POWER_AUTOMATE_URL else "ausente"},
-		"POWER_AUTOMATE_SECRET": {"configurado": bool(POWER_AUTOMATE_SECRET), "obrigatorio": True, "valor_seguro": "preenchido" if POWER_AUTOMATE_SECRET else "ausente"},
-		"SHAREPOINT_FOLDER_PATH": {"configurado": bool(SHAREPOINT_FOLDER_PATH), "obrigatorio": False, "valor_seguro": SHAREPOINT_FOLDER_PATH},
-		"SHAREPOINT_FILE_NAME": {"configurado": bool(SHAREPOINT_FILE_NAME), "obrigatorio": False, "valor_seguro": SHAREPOINT_FILE_NAME},
-	}
-	faltantes = [nome for nome, item in itens.items() if item["obrigatorio"] and not item["configurado"]]
-	return {
-		"habilitada": bool(POWER_AUTOMATE_ENABLED),
-		"configurada": bool(POWER_AUTOMATE_ENABLED and not faltantes),
-		"faltantes": faltantes,
-		"itens": itens,
-		"modo": "Power Automate → Excel Online (Business) → SharePoint/OneDrive",
-	}
-
-
-def _onedrive_configurado():
-	# Compatibilidade com o restante do código: agora significa Power Automate configurado.
-	return _power_automate_configurado()
 
 
 def _normalizar_valor_excel(valor):
@@ -157,356 +108,6 @@ def _snapshot_do_xlsx(conteudo):
 	return _workbook_para_snapshot(conteudo)
 
 
-def _power_automate_request(action, snapshot=None, extra=None):
-	if not _power_automate_configurado():
-		d = _diagnostico_configuracao_power_automate()
-		faltantes = ", ".join(d["faltantes"]) or "POWER_AUTOMATE_ENABLED está desabilitado"
-		raise RuntimeError(f"Integração Power Automate não configurada. Variável(is) ausente(s): {faltantes}.")
-	payload = {
-		"action": action,
-		"requestId": str(uuid.uuid4()),
-		"source": "SP_AGUAS",
-		"timestamp": agora(),
-	}
-	if snapshot is not None:
-		payload["snapshot"] = snapshot
-	if extra:
-		payload.update(extra)
-	headers = {
-		"Content-Type": "application/json",
-		"Accept": "application/json",
-		"X-SP-AGUAS-SECRET": POWER_AUTOMATE_SECRET,
-	}
-	try:
-		with urlopen(Request(POWER_AUTOMATE_URL, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST", headers=headers), timeout=POWER_AUTOMATE_TIMEOUT) as resposta:
-			texto = resposta.read().decode("utf-8", errors="replace")
-			if not texto:
-				return {"status": "OK"}
-			resultado = json.loads(texto)
-			if isinstance(resultado, dict) and resultado.get("status") in {"ERRO", "ERROR"}:
-				if int(resultado.get("httpStatus") or resultado.get("statusCode") or 0) in (409, 412):
-					raise ConcurrentUpdateError(resultado.get("mensagem") or "O Excel foi alterado durante a operação.")
-				raise RuntimeError(resultado.get("mensagem") or resultado.get("error") or "Power Automate retornou erro.")
-			return resultado if isinstance(resultado, dict) else {"status": "OK", "result": resultado}
-	except HTTPError as erro:
-		detalhe = erro.read().decode("utf-8", errors="replace")[:1800]
-		raise RuntimeError(f"Power Automate retornou HTTP {erro.code}: {detalhe}") from erro
-	except (URLError, TimeoutError, json.JSONDecodeError) as erro:
-		raise RuntimeError(f"Não foi possível acessar o fluxo do Power Automate: {erro}") from erro
-
-
-def _pa_snapshot_remoto():
-	resposta = _power_automate_request("GET_SNAPSHOT")
-	snapshot = resposta.get("snapshot") or resposta.get("data") or resposta.get("result")
-	if isinstance(snapshot, str):
-		try:
-			snapshot = json.loads(snapshot)
-		except json.JSONDecodeError as erro:
-			raise RuntimeError("O Power Automate retornou um snapshot inválido.") from erro
-	if not isinstance(snapshot, dict):
-		raise RuntimeError("O Power Automate não retornou o snapshot do Excel.")
-	return snapshot, resposta.get("version") or resposta.get("etag") or resposta.get("lastModified") or "power-automate"
-
-
-def _graph_metadata_diagnostico():
-	_, versao = _pa_snapshot_remoto()
-	return {"eTag": str(versao), "version": str(versao), "name": SHAREPOINT_FILE_NAME, "source": "Power Automate"}
-
-
-def _graph_download_diagnostico():
-	snapshot, _ = _pa_snapshot_remoto()
-	return _snapshot_para_xlsx(snapshot)
-
-
-def _graph_upload_diagnostico(conteudo, etag=None):
-	snapshot = _snapshot_do_xlsx(conteudo)
-	resposta = _power_automate_request("REPLACE_SNAPSHOT", snapshot=snapshot, extra={"expectedVersion": etag or ""})
-	status = resposta.get("httpStatus") or resposta.get("statusCode") or 200
-	if isinstance(status, str) and status.isdigit():
-		status = int(status)
-	if status in (409, 412):
-		raise ConcurrentUpdateError("O Excel foi alterado durante a operação pelo Power Automate.")
-	if status not in (200, 201):
-		raise RuntimeError(f"Power Automate não confirmou a gravação (status {status}).")
-	return int(status)
-
-
-def _graph_snapshot():
-	meta = _graph_metadata_diagnostico()
-	conteudo = _graph_download_diagnostico()
-	if not conteudo:
-		raise RuntimeError("O Power Automate retornou o Excel vazio.")
-	return meta, conteudo
-
-
-def obter_planilha():
-	if not _power_automate_configurado():
-		return None
-	conteudo = _graph_download_diagnostico()
-	with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as temporario:
-		temporario.write(conteudo)
-		return temporario.name
-
-
-def _baixar_planilha_one_drive():
-	caminho_temporario = obter_planilha()
-	if not caminho_temporario:
-		return False
-	os.makedirs(os.path.dirname(os.path.abspath(PLANILHA)), exist_ok=True)
-	try:
-		os.replace(caminho_temporario, PLANILHA)
-	finally:
-		if os.path.exists(caminho_temporario):
-			os.unlink(caminho_temporario)
-	return True
-
-
-def salvar_planilha():
-	raise RuntimeError("Gravação direta desabilitada. Use o fluxo do Power Automate.")
-
-
-def _enviar_planilha_one_drive():
-	return salvar_planilha()
-
-
-def _onedrive_token():
-	# Compatibilidade com funções legadas; nenhum token Microsoft é usado pelo Vercel.
-	return "POWER_AUTOMATE"
-
-
-def _onedrive_url():
-	return POWER_AUTOMATE_URL
-
-
-def _onedrive_path_metadata_url():
-	return POWER_AUTOMATE_URL
-
-
-def _onedrive_folder_metadata_url():
-	return POWER_AUTOMATE_URL
-
-
-def _resolver_arquivo_graph(token=None):
-	return {"name": SHAREPOINT_FOLDER_PATH}, {"name": SHAREPOINT_FILE_NAME, "id": "power-automate"}
-
-
-class ConcurrentUpdateError(RuntimeError):
-	pass
-
-
-def _graph_snapshot():
-	"""Lê metadados e bytes do mesmo arquivo remoto."""
-	meta = _graph_metadata_diagnostico()
-	etag = meta.get("eTag")
-	if not etag:
-		raise RuntimeError("O SharePoint não retornou o eTag do arquivo remoto.")
-	conteudo = _graph_download_diagnostico()
-	if not conteudo:
-		raise RuntimeError("O arquivo remoto está vazio.")
-	return meta, conteudo
-
-
-def _gerar_xlsx_com_demanda(conteudo_remoto, demanda, historico):
-	"""Atualiza o XLSX remoto preservando todas as abas e linhas existentes."""
-	workbook = load_workbook(io.BytesIO(conteudo_remoto))
-	try:
-		if "demandas" not in workbook.sheetnames or "historico" not in workbook.sheetnames:
-			raise RuntimeError("O arquivo remoto precisa conter as abas demandas e historico.")
-	
-		# Demanda
-		planilha = workbook["demandas"]
-		cabecalho = [c.value for c in planilha[1]]
-		indices = {nome: cabecalho.index(nome) + 1 for nome in TABELAS_EXCEL["demandas"] if nome in cabecalho}
-		if len(indices) != len(TABELAS_EXCEL["demandas"]):
-			raise RuntimeError("A aba demandas não possui todas as colunas esperadas.")
-		planilha.append([demanda[coluna] for coluna in TABELAS_EXCEL["demandas"]])
-
-		# Histórico
-		planilha_h = workbook["historico"]
-		cab_h = [c.value for c in planilha_h[1]]
-		if not all(c in cab_h for c in TABELAS_EXCEL["historico"]):
-			raise RuntimeError("A aba historico não possui todas as colunas esperadas.")
-		planilha_h.append([historico[coluna] for coluna in TABELAS_EXCEL["historico"]])
-
-		buffer = io.BytesIO()
-		workbook.save(buffer)
-		return buffer.getvalue()
-	finally:
-		workbook.close()
-
-
-def _confirmar_demanda_no_xlsx(conteudo, demanda_id):
-	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
-	try:
-		if "demandas" not in workbook.sheetnames:
-			return False
-		planilha = workbook["demandas"]
-		cabecalho = [c.value for c in next(planilha.iter_rows(min_row=1, max_row=1))]
-		if "id" not in cabecalho:
-			raise RuntimeError("A aba demandas não possui a coluna id.")
-		idx = cabecalho.index("id")
-		return any(linha[idx] == demanda_id for linha in planilha.iter_rows(min_row=2, values_only=True))
-	finally:
-		workbook.close()
-
-
-def salvar_demanda_atomicamente(valores, usuario_id, tentativas=3):
-	"""Cadastra uma demanda usando o Power Automate como camada de persistência."""
-	def mutator(workbook):
-		planilha = workbook["demandas"]
-		cabecalho = _cabecalho_planilha(planilha)
-		demanda_id = _proximo_id(planilha, cabecalho)
-		agora_valor = agora()
-		registro = dict(zip(TABELAS_EXCEL["demandas"], (demanda_id, *valores, usuario_id, agora_valor, agora_valor)))
-		_append_registro(planilha, TABELAS_EXCEL["demandas"], registro)
-		ph = workbook["historico"]
-		hid = _proximo_id(ph, _cabecalho_planilha(ph))
-		historico = {"id": hid, "demanda_id": demanda_id, "usuario_id": usuario_id, "acao": "CRIACAO", "descricao": "Demanda cadastrada.", "data_hora": agora_valor}
-		_append_registro(ph, TABELAS_EXCEL["historico"], historico)
-		return {"demanda_id": demanda_id, "historico_id": hid}
-	resultado = executar_mutacao_atomica(mutator, lambda conteudo, r: _confirmar_id_na_aba(conteudo, "demandas", r["demanda_id"]) and _confirmar_id_na_aba(conteudo, "historico", r["historico_id"]), tentativas=tentativas)
-	return {"status": "OK", **resultado, "mensagem": "Demanda cadastrada e confirmada pelo Power Automate."}
-
-
-def _carregar_xlsx_bytes_na_conexao(conn, conteudo):
-	"""Carrega um snapshot XLSX em uma conexão SQLite em memória já existente."""
-	workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
-	try:
-		for tabela, colunas in TABELAS_EXCEL.items():
-			if tabela not in workbook.sheetnames:
-				continue
-			planilha = workbook[tabela]
-			cabecalho = [c.value for c in next(planilha.iter_rows(min_row=1, max_row=1))]
-			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
-			for linha in planilha.iter_rows(min_row=2, values_only=True):
-				if not any(v is not None for v in linha):
-					continue
-				valores_linha = tuple(linha[indices[c]] if c in indices and indices[c] < len(linha) else "" for c in colunas)
-				conn._conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", valores_linha)
-	finally:
-		workbook.close()
-
-
-
-def salvar_demanda_com_confirmacao(demanda):
-	"""Sincroniza uma demanda e confirma sua presença no arquivo remoto."""
-	arquivo_remoto = _graph_download_diagnostico()
-	metadata = _graph_metadata_diagnostico()
-	etag = metadata.get("eTag")
-	if not etag:
-		raise RuntimeError("O SharePoint não retornou o eTag do arquivo remoto.")
-	workbook = load_workbook(io.BytesIO(arquivo_remoto))
-	if "demandas" not in workbook.sheetnames:
-		workbook.close()
-		raise RuntimeError("O arquivo remoto não possui a aba demandas.")
-	planilha = workbook["demandas"]
-	nova_linha = [demanda[coluna] for coluna in TABELAS_EXCEL["demandas"]]
-	cabecalho = [celula.value for celula in planilha[1]]
-	try:
-		indice_id = cabecalho.index("id") + 1
-	except ValueError as erro:
-		workbook.close()
-		raise RuntimeError("A aba demandas não possui a coluna id.") from erro
-
-	linha_existente = None
-	for numero_linha in range(2, planilha.max_row + 1):
-		if planilha.cell(numero_linha, indice_id).value == demanda["id"]:
-			linha_existente = numero_linha
-			break
-	if linha_existente is None:
-		planilha.append(nova_linha)
-	else:
-		for numero_coluna, valor in enumerate(nova_linha, 1):
-			planilha.cell(linha_existente, numero_coluna).value = valor
-	buffer = io.BytesIO()
-	workbook.save(buffer)
-	workbook.close()
-	novo_xlsx = buffer.getvalue()
-	novo_hash = hashlib.sha256(novo_xlsx).hexdigest()
-	status = _graph_upload_diagnostico(novo_xlsx, etag=etag)
-	if status not in (200, 201):
-		raise RuntimeError(f"Falha ao gravar no SharePoint. HTTP={status}")
-
-	remoto_confirmacao = _graph_download_diagnostico()
-	workbook_confirmacao = load_workbook(io.BytesIO(remoto_confirmacao), read_only=True, data_only=True)
-	try:
-		if "demandas" not in workbook_confirmacao.sheetnames:
-			raise RuntimeError("Arquivo remoto não possui a aba demandas após a gravação.")
-		indice_id_confirmacao = [celula.value for celula in next(workbook_confirmacao["demandas"].iter_rows(min_row=1, max_row=1))].index("id")
-		encontrada = any(
-			linha[indice_id_confirmacao] == demanda["id"]
-			for linha in workbook_confirmacao["demandas"].iter_rows(min_row=2, values_only=True)
-		)
-	finally:
-		workbook_confirmacao.close()
-	if not encontrada:
-		raise RuntimeError("Arquivo remoto não contém a demanda recém gravada.")
-	return {"status": "OK", "hash_enviado": novo_hash, "hash_remoto": hashlib.sha256(remoto_confirmacao).hexdigest(), "mensagem": "Demanda cadastrada e confirmada no SharePoint."}
-
-
-def salvar_demanda_sharepoint_seguro(demanda_id):
-	"""Atualiza uma demanda remota com eTag e confirma a persistência."""
-	metadata = _graph_metadata_diagnostico()
-	etag = metadata.get("eTag")
-	if not etag:
-		raise RuntimeError("SharePoint não retornou eTag.")
-
-	arquivo_remoto = _graph_download_diagnostico()
-	workbook = load_workbook(io.BytesIO(arquivo_remoto))
-	try:
-		if "demandas" not in workbook.sheetnames:
-			raise RuntimeError("Aba demandas não encontrada.")
-
-		conn = conectar()
-		registro = conn.execute("SELECT * FROM demandas WHERE id = ?", (demanda_id,)).fetchone()
-		conn.close()
-		if not registro:
-			raise RuntimeError("Demanda não encontrada.")
-
-		planilha = workbook["demandas"]
-		cabecalho = [celula.value for celula in planilha[1]]
-		try:
-			indice_id = cabecalho.index("id") + 1
-		except ValueError as erro:
-			raise RuntimeError("A aba demandas não possui a coluna id.") from erro
-
-		valores = [registro[coluna] for coluna in TABELAS_EXCEL["demandas"]]
-		linha_localizada = next((linha for linha in range(2, planilha.max_row + 1) if planilha.cell(linha, indice_id).value == registro["id"]), None)
-		if linha_localizada:
-			for coluna, valor in enumerate(valores, start=1):
-				planilha.cell(linha_localizada, coluna).value = valor
-		else:
-			planilha.append(valores)
-
-		buffer = io.BytesIO()
-		workbook.save(buffer)
-		bytes_xlsx = buffer.getvalue()
-	finally:
-		workbook.close()
-
-	hash_enviado = hashlib.sha256(bytes_xlsx).hexdigest()
-	status = _graph_upload_diagnostico(bytes_xlsx, etag)
-	if status not in (200, 201):
-		raise RuntimeError("Falha ao gravar no SharePoint.")
-
-	remoto = _graph_download_diagnostico()
-	hash_remoto = hashlib.sha256(remoto).hexdigest()
-	if hash_enviado != hash_remoto:
-		raise RuntimeError("Confirmação SHA-256 falhou.")
-
-	workbook_confirmacao = load_workbook(io.BytesIO(remoto), read_only=True, data_only=True)
-	try:
-		planilha_confirmacao = workbook_confirmacao["demandas"]
-		cabecalho_confirmacao = [celula.value for celula in next(planilha_confirmacao.iter_rows(min_row=1, max_row=1))]
-		indice_confirmacao = cabecalho_confirmacao.index("id")
-		encontrada = any(linha[indice_confirmacao] == demanda_id for linha in planilha_confirmacao.iter_rows(min_row=2, values_only=True))
-	finally:
-		workbook_confirmacao.close()
-	if not encontrada:
-		raise RuntimeError("Demanda não localizada no arquivo remoto.")
-	return "Demanda cadastrada"
-
-
 def _criar_esquema(conn):
 	conn.executescript("""
 		CREATE TABLE IF NOT EXISTS usuarios (
@@ -544,7 +145,7 @@ def _carregar_planilha(conn):
 			for linha in planilha.iter_rows(min_row=2, values_only=True):
 				if not any(valor is not None for valor in linha):
 					continue
-				valores = tuple(linha[indices[coluna]] for coluna in colunas)
+				valores = tuple(linha[indices[coluna]] if coluna in indices and indices[coluna] < len(linha) else "" for coluna in colunas)
 				conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", valores)
 	finally:
 		workbook.close()
@@ -593,17 +194,18 @@ def _salvar_planilha(conn):
 	finally:
 		if os.path.exists(caminho_temporario):
 			os.unlink(caminho_temporario)
-	_enviar_planilha_one_drive()
+	workbook.close()
 
 
 class ConexaoExcel:
 	def __init__(self):
-		self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+		self._conn = sqlite3.connect(SQLITE_LEGADO, check_same_thread=False)
 		self._conn.row_factory = sqlite3.Row
-		_baixar_planilha_one_drive()
 		_criar_esquema(self._conn)
-		if not _carregar_planilha(self._conn):
-			_carregar_sqlite_legado(self._conn)
+		total = sum(self._conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL)
+		if total == 0 and os.path.exists(PLANILHA):
+			_carregar_planilha(self._conn)
+			self._conn.commit()
 
 	def execute(self, consulta, parametros=()):
 		return self._conn.execute(consulta, parametros)
@@ -612,13 +214,12 @@ class ConexaoExcel:
 		return self._conn.executescript(consulta)
 
 	def commit(self):
-		# O XLSX remoto só é alterado pelos fluxos atômicos com eTag/If-Match.
-		# Commit aqui confirma apenas a transação da conexão em memória.
 		with ARQUIVO_LOCK:
 			self._conn.commit()
 
 	def close(self):
 		pass
+
 
 
 def conectar():
@@ -630,8 +231,10 @@ def conectar():
 
 
 def sincronizar_planilha():
-	"""Mantido por compatibilidade, mas sem PUT cego do banco em memória."""
-	return executar_mutacao_atomica(lambda workbook: {"operacao": "SINCRONIZACAO"})
+	conn = conectar()
+	with ARQUIVO_LOCK:
+		_salvar_planilha(conn)
+	return {"status": "OK", "arquivo": PLANILHA}
 
 
 def agora():
@@ -673,60 +276,28 @@ def _salvar_workbook_preservando_arquivo(workbook):
 	return buffer.getvalue()
 
 
-def _atualizar_conexao_com_snapshot(conteudo):
-	"""Depois de uma gravação confirmada, faz a conexão em memória refletir o XLSX remoto."""
+def executar_mutacao_atomica(mutator, confirmador=None, tentativas=1):
+	"""Aplica a alteração no Excel local e recarrega o banco SQLite."""
 	global CONEXAO_COMPARTILHADA
 	with ARQUIVO_LOCK:
-		if CONEXAO_COMPARTILHADA is None:
-			CONEXAO_COMPARTILHADA = ConexaoExcel()
-		conn = CONEXAO_COMPARTILHADA
-		conn._conn.rollback()
-		for tabela in reversed(tuple(TABELAS_EXCEL.keys())):
-			conn._conn.execute(f"DELETE FROM {tabela}")
-		_carregar_xlsx_bytes_na_conexao(conn, conteudo)
-		conn._conn.commit()
-	return conn
-
-
-def executar_mutacao_atomica(mutator, confirmador=None, tentativas=3):
-	"""Executa a mutação localmente sobre um snapshot e devolve o XLSX ao Power Automate.
-
-	O Vercel nunca autentica no Microsoft Graph e nunca envia o arquivo diretamente ao
-	SharePoint. O fluxo Power Automate recebe o snapshot e grava o Excel por meio do
-	Excel Online (Business)/Office Scripts.
-	"""
-	if not _power_automate_configurado():
-		d = _diagnostico_configuracao_power_automate()
-		faltantes = ", ".join(d["faltantes"]) or "POWER_AUTOMATE_ENABLED está desabilitado"
-		raise RuntimeError(f"Integração Power Automate não configurada. Faltantes: {faltantes}.")
-	ultimo_conflito = None
-	for tentativa in range(1, tentativas + 1):
-		with ARQUIVO_LOCK:
-			meta, remoto_antes = _graph_snapshot()
-			versao = meta.get("eTag")
-			workbook = load_workbook(io.BytesIO(remoto_antes))
-			try:
-				resultado = mutator(workbook)
-				novo_xlsx = _salvar_workbook_preservando_arquivo(workbook)
-			finally:
-				workbook.close()
-			try:
-				status_put = _graph_upload_diagnostico(novo_xlsx, etag=versao)
-			except ConcurrentUpdateError as erro:
-				ultimo_conflito = erro
-				continue
-			if status_put not in (200, 201):
-				raise RuntimeError(f"Power Automate retornou status {status_put}.")
-			remoto_depois = _graph_download_diagnostico()
-			if hashlib.sha256(remoto_depois).hexdigest() != hashlib.sha256(novo_xlsx).hexdigest():
-				raise RuntimeError("O Excel confirmado pelo Power Automate ficou diferente do conteúdo enviado.")
-			if confirmador is not None and not confirmador(remoto_depois, resultado):
-				raise RuntimeError("A operação foi enviada, mas não pôde ser confirmada no Excel remoto.")
-			_atualizar_conexao_com_snapshot(remoto_depois)
-			return {"status": "OK", **(resultado if isinstance(resultado, dict) else {"resultado": resultado}), "tentativa": tentativa}
-	if ultimo_conflito:
-		raise RuntimeError("O Excel foi alterado simultaneamente. Tente novamente.") from ultimo_conflito
-	raise RuntimeError("Não foi possível concluir a gravação pelo Power Automate.")
+		if not os.path.exists(PLANILHA):
+			# Cria o arquivo inicial a partir do banco atual.
+			conn = conectar()
+			_salvar_planilha(conn)
+		workbook = load_workbook(PLANILHA)
+		try:
+			resultado = mutator(workbook)
+			workbook.save(PLANILHA)
+		finally:
+			workbook.close()
+		# Recria o banco SQLite a partir do Excel para manter as duas camadas sincronizadas.
+		if CONEXAO_COMPARTILHADA is not None:
+			CONEXAO_COMPARTILHADA._conn.close()
+		CONEXAO_COMPARTILHADA = None
+		if os.path.exists(SQLITE_LEGADO):
+			os.remove(SQLITE_LEGADO)
+		CONEXAO_COMPARTILHADA = ConexaoExcel()
+		return {"status": "OK", **(resultado if isinstance(resultado, dict) else {"resultado": resultado})}
 
 
 def _append_registro(planilha, colunas, registro):
@@ -842,7 +413,7 @@ def calcular_prazos(prazo_area, prazo_fatal):
 
 
 def registrar_historico(demanda_id, usuario_id, acao, descricao):
-	"""Registra histórico no mesmo ciclo atômico do Excel remoto."""
+	"""Registra histórico no banco local."""
 	def mutator(workbook):
 		planilha = workbook["historico"]
 		cabecalho = _cabecalho_planilha(planilha)
@@ -995,12 +566,9 @@ def configurar():
 			return redirect(url_for("login"))
 		except Exception as erro:
 			return pagina("Configuração", f'<div class="card"><div class="erro">Não foi possível concluir a configuração: {html.escape(str(erro))}</div></div>')
-	# Verificação somente leitura da versão remota atual.
 	try:
-		_, remoto = _graph_snapshot()
-		wb = load_workbook(io.BytesIO(remoto), read_only=True, data_only=True)
-		total = max(wb["usuarios"].max_row - 1, 0) if "usuarios" in wb.sheetnames else 0
-		wb.close()
+		conn = conectar()
+		total = conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0]
 		if total:
 			return redirect(url_for("login"))
 	except Exception:
@@ -1125,8 +693,12 @@ def _url_pdf_doe(data_iso):
 def _download_pdf_url(url):
     """Baixa um PDF informado pelo usuário, sem depender da data do DOE."""
     url = (url or "").strip()
-    if not (url.startswith("https://") or url.startswith("http://")):
+    partes_url = urlparse(url)
+    if partes_url.scheme not in {"https", "http"} or not partes_url.netloc:
         raise ValueError("Informe um link HTTP/HTTPS válido para o PDF.")
+    host = (partes_url.hostname or "").lower().rstrip(".")
+    if host not in {"doe.tce.sp.gov.br", "tce.sp.gov.br", "www.tce.sp.gov.br"} and not host.endswith(".tce.sp.gov.br"):
+        raise ValueError("Por segurança, o link deve pertencer ao domínio oficial do TCESP.")
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; SP-AGUAS/1.0)",
         "Accept": "application/pdf,application/octet-stream,*/*;q=0.8",
@@ -1238,33 +810,23 @@ def _extrair_ocorrencias_doe(conteudo, data_iso="", url="", palavra_chave=""):
 
 @app.route("/api/doe-tcesp/extrair", methods=["POST"])
 def extrair_doe_tcesp():
-    if (resposta := acesso_login()): return resposta
+    if (resposta := acesso_login()):
+        return resposta
     palavra = (request.form.get("palavra_chave") or "").strip()
     if palavra and _normalizar_pesquisa_doe(palavra) not in {_normalizar_pesquisa_doe(k) for k in DOE_KEYWORDS}:
         return jsonify({"erro": "Palavra-chave não cadastrada.", "resultados": []}), 400
     try:
-        arquivo = request.files.get("pdf")
         link = (request.form.get("url") or "").strip()
-        if arquivo and arquivo.filename:
-            if not arquivo.filename.lower().endswith(".pdf"):
-                return jsonify({"erro": "Selecione um arquivo PDF.", "resultados": []}), 400
-            conteudo = arquivo.read()
-            if not conteudo.startswith(b"%PDF"):
-                return jsonify({"erro": "O arquivo selecionado não parece ser um PDF válido.", "resultados": []}), 400
-            if len(conteudo) > 12 * 1024 * 1024:
-                return jsonify({"erro": "O PDF é maior que 12 MB. Use o link direto da publicação.", "resultados": []}), 413
-            url = ""
-        elif link:
-            conteudo = _download_pdf_url(link)
-            url = link
-        else:
-            return jsonify({"erro": "Envie um PDF ou informe o link da publicação.", "resultados": []}), 400
-        resultados, meta, paginas, possui_texto = _extrair_ocorrencias_doe(conteudo, url=url, palavra_chave=palavra)
+        if not link:
+            return jsonify({"erro": "Para leitura pelo servidor, informe o link direto do PDF. PDFs selecionados do computador são lidos diretamente no navegador.", "resultados": []}), 400
+        conteudo = _download_pdf_url(link)
+        resultados, meta, paginas, possui_texto = _extrair_ocorrencias_doe(conteudo, url=link, palavra_chave=palavra)
         if not possui_texto:
             return jsonify({"erro": "O PDF foi recebido, mas não possui texto pesquisável. Se for uma publicação digitalizada, será necessário OCR.", "resultados": [], "meta": meta}), 422
-        return jsonify({"resultados": resultados, "meta": meta, "paginas": paginas, "url": url})
+        return jsonify({"resultados": resultados, "meta": meta, "paginas": paginas, "url": link})
     except Exception as exc:
         return jsonify({"erro": str(exc), "resultados": []}), 502
+
 
 @app.route("/nova-demanda", methods=["GET", "POST"])
 def nova_demanda():
@@ -1277,9 +839,9 @@ def nova_demanda():
 			resultado = salvar_demanda_atomicamente(valores, session["usuario_id"], tentativas=3)
 			if resultado.get("status") == "OK":
 				return redirect(url_for("demandas"))
-			raise RuntimeError("O cadastro não foi confirmado no SharePoint.")
+			raise RuntimeError("O cadastro não foi confirmado no banco local.")
 		except Exception as erro:
-			return pagina("Nova demanda", f'<div class="card"><div class="erro">Demanda NÃO confirmada no SharePoint. {html.escape(str(erro))}</div><a class="btn" href="/nova-demanda">Tentar novamente</a> <a class="btn btn-cinza" href="/demandas">Voltar</a></div>')
+			return pagina("Nova demanda", f'<div class="card"><div class="erro">Demanda NÃO confirmada no banco local. {html.escape(str(erro))}</div><a class="btn" href="/nova-demanda">Tentar novamente</a> <a class="btn btn-cinza" href="/demandas">Voltar</a></div>')
 	return pagina("Nova demanda", formulario())
 
 
@@ -1335,38 +897,95 @@ const DOE_KEYWORDS = {doe_keywords};
   const select = document.getElementById("doe_pesquisa_keyword");
   DOE_KEYWORDS.forEach(k => {{ const o=document.createElement("option"); o.value=k; o.textContent=k; if(k===document.getElementById("doe_palavra_chave").value)o.selected=true; select.appendChild(o); }});
 }})();
+
+function normalizarDOE(v) {{
+  return String(v || "").normalize("NFD").replace(/[\\u0300-\u036f]/g, "").toUpperCase();
+}}
+function processosNoTexto(texto) {{
+  const encontrados = [];
+  const padroes = [/(?:e?TC|TCESP)[-\\s]?\\d{{1,8}}[/.-]\\d{{1,4}}[/.-]\\d{{2,4}}/gi, /\\b\\d{{5,8}}[/.-]\\d{{2,4}}\b/g];
+  padroes.forEach(re => {{ for (const m of String(texto || "").matchAll(re)) {{ const v=m[0].replace(/\\s+/g, ""); if(!encontrados.includes(v)) encontrados.push(v); }} }});
+  return encontrados.slice(0,20);
+}}
+function extrairDataPublicacao(texto) {{
+  const m = String(texto || "").match(/(?:Data de publica[cç][aã]o|Data da publica[cç][aã]o|Publica[cç][aã]o)\\s*[:—-]?\\s*(\\d{{2}}\\/\\d{{2}}\\/\\d{{4}})/i);
+  return m ? m[1] : "";
+}}
+function formatarDataISO(data) {{
+  return data && /^\\d{{2}}\\/\\d{{2}}\\/\\d{{4}}$/.test(data) ? data.split("/").reverse().join("-") : "";
+}}
+function carregarPdfJs() {{
+  return new Promise((resolve, reject) => {{
+    if(window.pdfjsLib) return resolve(window.pdfjsLib);
+    const script=document.createElement("script");
+    script.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    script.onload=() => {{ window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; resolve(window.pdfjsLib); }};
+    script.onerror=() => reject(new Error("Não foi possível carregar o leitor de PDF no navegador."));
+    document.head.appendChild(script);
+  }});
+}}
+function mostrarResultadosDOE(resultados, paginas, url, meta) {{
+  const box=document.getElementById("doe_resultados"), status=document.getElementById("doe_status");
+  if(meta) {{
+    document.getElementById("doe_edicao").value=meta.edicao || document.getElementById("doe_edicao").value;
+    if(meta.data_publicacao) document.getElementById("doe_data").value=formatarDataISO(meta.data_publicacao);
+  }}
+  if(!resultados.length) {{
+    box.innerHTML='<div class="empty"><strong>Nenhuma palavra-chave encontrada.</strong><br>O documento foi lido, mas nenhum termo selecionado foi localizado.</div>';
+    status.textContent="Documento lido sem ocorrências."; return;
+  }}
+  window._doeResultados=resultados;
+  box.innerHTML=resultados.map((item,i)=>`<div class="alerta normal" style="margin-top:8px"><strong>${{escapeHtml(item.palavra_chave)}}</strong><div class="muted">${{escapeHtml(item.secao)}}${{item.data_publicacao?' · Publicação: '+escapeHtml(item.data_publicacao):''}}</div><div style="margin-top:6px">${{escapeHtml(item.trecho)}}</div>${{item.processos&&item.processos.length?'<div class="muted" style="margin-top:6px"><strong>Processo(s):</strong> '+escapeHtml(item.processos.join(", "))+'</div>':''}}<button type="button" class="btn" style="margin-top:9px" onclick="usarDOE(${{i}})">Usar esta ocorrência</button></div>`).join("");
+  status.textContent=`${{resultados.length}} ocorrência(s) encontrada(s) em ${{paginas}} página(s).`;
+  if(url) document.getElementById("doe_url").value=url;
+}}
+async function extrairPdfNoNavegador(arquivo, palavra) {{
+  const pdfjsLib=await carregarPdfJs();
+  const buffer=await arquivo.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({{data:buffer}}).promise;
+  const resultados=[];
+  const termos=palavra ? [palavra] : DOE_KEYWORDS;
+  let dataPublicacao="", edicao="DOE-TCESP";
+  for(let pagina=1; pagina<=pdf.numPages; pagina++) {{
+    const page=await pdf.getPage(pagina);
+    const content=await page.getTextContent();
+    const texto=content.items.map(x=>x.str || "").join(" ");
+    if(!dataPublicacao) dataPublicacao=extrairDataPublicacao(texto);
+    const normalizado=normalizarDOE(texto);
+    for(const termo of termos) {{
+      const alvo=normalizarDOE(termo), pos=normalizado.indexOf(alvo);
+      if(pos<0) continue;
+      const inicio=Math.max(0,pos-420), fim=Math.min(texto.length,pos+termo.length+650);
+      resultados.push({{data:formatarDataISO(dataPublicacao),data_publicacao:dataPublicacao,edicao,secao:`Página ${{pagina}}`,palavra_chave:termo,trecho:texto.slice(inicio,fim).replace(/\\s+/g," ").trim(),pagina,url:"",processos:processosNoTexto(texto.slice(inicio,fim))}});
+    }}
+  }}
+  return {{resultados:resultados.slice(0,200),paginas:pdf.numPages,meta:{{data_publicacao:dataPublicacao,edicao}},url:""}};
+}}
 async function extrairDOE() {{
   const link=document.getElementById("doe_link").value.trim();
   const arquivo=document.getElementById("doe_pdf").files[0];
   const palavra=document.getElementById("doe_pesquisa_keyword").value;
-  const status=document.getElementById("doe_status"), box=document.getElementById("doe_resultados");
+  const status=document.getElementById("doe_status");
   if(!link && !arquivo) {{ status.textContent="Informe o link do PDF ou selecione um PDF."; return; }}
-  const form=new FormData();
-  if(arquivo) form.append("pdf", arquivo);
-  if(link) form.append("url", link);
-  form.append("palavra_chave", palavra);
-  status.textContent="Lendo o PDF e procurando as palavras-chave..."; box.innerHTML="";
+  status.textContent="Lendo o documento e procurando as palavras-chave..."; document.getElementById("doe_resultados").innerHTML="";
   try {{
-    const r=await fetch("/api/doe-tcesp/extrair", {{method:"POST", body:form}});
-    const j=await r.json(); if(!r.ok) throw new Error(j.erro||"Não foi possível ler o PDF.");
-    if(j.meta) {{
-      document.getElementById("doe_edicao").value=j.meta.edicao||document.getElementById("doe_edicao").value;
-      if(j.meta.data_publicacao) document.getElementById("doe_data").value=j.meta.data_publicacao.split("/").reverse().join("-");
+    if(arquivo) {{
+      if(arquivo.type !== "application/pdf" && !arquivo.name.toLowerCase().endsWith(".pdf")) throw new Error("Selecione um arquivo PDF válido.");
+      const j=await extrairPdfNoNavegador(arquivo,palavra);
+      mostrarResultadosDOE(j.resultados,j.paginas,"",j.meta);
+      return;
     }}
-    if(!j.resultados.length) {{
-      box.innerHTML='<div class="empty"><strong>Nenhuma palavra-chave encontrada.</strong>O PDF foi lido, mas nenhum dos termos selecionados foi localizado no texto extraído.</div>';
-      status.textContent="PDF lido sem ocorrências.";
-    }} else {{
-      window._doeResultados=j.resultados;
-      box.innerHTML=j.resultados.map((item,i)=>`<div class="alerta normal" style="margin-top:8px"><strong>${{escapeHtml(item.palavra_chave)}}</strong><div class="muted">${{escapeHtml(item.secao)}}${{item.data_publicacao?' · Publicação: '+escapeHtml(item.data_publicacao):''}}</div><div style="margin-top:6px">${{escapeHtml(item.trecho)}}</div>${{item.processos&&item.processos.length?'<div class="muted" style="margin-top:6px"><strong>Processo(s):</strong> '+escapeHtml(item.processos.join(", "))+'</div>':''}}<button type="button" class="btn" style="margin-top:9px" onclick="usarDOE(${{i}})">Usar esta ocorrência</button></div>`).join("");
-      status.textContent=`${{j.resultados.length}} ocorrência(s) encontrada(s) em ${{j.paginas}} página(s).`;
-      if(j.url) document.getElementById("doe_url").value=j.url;
-    }}
-  }} catch(e) {{ status.textContent="Erro: "+e.message; }}
+    const body=new URLSearchParams({{url:link,palavra_chave:palavra}});
+    const r=await fetch("/api/doe-tcesp/extrair",{{method:"POST",headers:{{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8","Accept":"application/json"}},body}});
+    const texto=await r.text();
+    let j; try {{ j=JSON.parse(texto); }} catch(parseError) {{ throw new Error(texto ? `O servidor retornou uma resposta que não é JSON: ${{texto.slice(0,180)}}` : `O servidor não retornou dados (HTTP ${{r.status}}).`); }}
+    if(!r.ok) throw new Error(j.erro || j.message || `Erro HTTP ${{r.status}}`);
+    mostrarResultadosDOE(j.resultados || [],j.paginas || 0,j.url || link,j.meta);
+  }} catch(e) {{ status.textContent="Erro: "+(e.message || "Não foi possível ler a publicação."); }}
 }}
 function usarDOE(i) {{
   const item=window._doeResultados[i]; if(!item) return;
-  const data=item.data_publicacao ? item.data_publicacao.split("/").reverse().join("-") : (item.data||"");
+  const data=item.data_publicacao ? formatarDataISO(item.data_publicacao) : (item.data||"");
   document.getElementById("doe_data").value=data;
   document.getElementById("doe_edicao").value=item.edicao||"";
   document.getElementById("doe_secao").value=item.secao||"";
@@ -1585,59 +1204,27 @@ def exportar():
 @app.route("/status")
 def status():
 	if (resposta := acesso_login()): return resposta
-	config = _diagnostico_configuracao_power_automate()
-	resultado = {"status": "OK", "power_automate_configurado": config["configurada"], "planilha_local": PLANILHA, "vercel": bool(os.environ.get("VERCEL")), "arquivo": SHAREPOINT_FILE_PATH}
-	if not config["configurada"]:
-		resultado.update(status="ERRO", erro=f"Integração Power Automate não configurada. Faltantes: {', '.join(config['faltantes']) or 'POWER_AUTOMATE_ENABLED está desabilitado'}", configuracao=config)
-		return jsonify(resultado), 500
 	try:
-		snapshot, versao = _pa_snapshot_remoto()
-		resultado.update(power_automate=True, excel_acessivel=True, versao=str(versao), tabelas={k: len(v) for k, v in snapshot.items()}, mensagem="CONEXÃO POWER AUTOMATE + EXCEL OK")
-		return jsonify(resultado), 200
+		conn = conectar()
+		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+		return jsonify({"status": "OK", "modo": "Excel + SQLite local", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "tabelas": contagens, "vercel": bool(os.environ.get("VERCEL"))})
 	except Exception as erro:
-		resultado.update(status="ERRO", power_automate=False, excel_acessivel=False, erro=str(erro))
-		return jsonify(resultado), 500
+		return jsonify({"status": "ERRO", "erro": str(erro), "arquivo": PLANILHA}), 500
 
 
 @app.route("/teste-integracao")
 def teste_integracao():
-	"""Diagnóstico somente leitura da integração Vercel → Power Automate → Excel."""
 	if not usuario_logado():
 		return jsonify({"status": "ERRO", "mensagem": "Usuário não autenticado."}), 401
 	if not administrador():
 		return jsonify({"status": "ERRO", "mensagem": "Somente administradores podem executar o teste."}), 403
-	config = _diagnostico_configuracao_power_automate()
-	resultado = {
-		"teste": "Integração SP ÁGUAS + Power Automate + Excel Online (Business)",
-		"status_final": "INICIANDO",
-		"pasta": SHAREPOINT_FOLDER_PATH,
-		"arquivo": SHAREPOINT_FILE_NAME,
-		"caminho_completo": SHAREPOINT_FILE_PATH,
-		"endpoint_power_automate": POWER_AUTOMATE_URL if config["configurada"] else None,
-		"observacao": "Este teste é somente leitura e não altera o Excel.",
-		"etapas": [],
-	}
-	def etapa(numero, nome, status_nome, mensagem, **dados):
-		item = {"numero": numero, "etapa": nome, "status": status_nome, "mensagem": mensagem}; item.update(dados); resultado["etapas"].append(item)
-	etapa(1, "Configuração Power Automate", "OK" if config["configurada"] else "ERRO",
-		"URL e segredo do fluxo estão configurados." if config["configurada"] else "A configuração está incompleta.",
-		habilitada=config["habilitada"], faltantes=config["faltantes"], variaveis={k: v["valor_seguro"] for k, v in config["itens"].items()})
-	if not config["configurada"]:
-		resultado["status_final"] = "FALHA_CONFIGURACAO"
-		resultado["mensagem_final"] = "Preencha POWER_AUTOMATE_URL, POWER_AUTOMATE_SECRET e POWER_AUTOMATE_ENABLED no Vercel e faça novo Deploy."
-		return jsonify(resultado), 500
 	try:
-		snapshot, versao = _pa_snapshot_remoto()
-		etapa(2, "Power Automate", "OK", "O fluxo respondeu ao pedido de leitura.", versao=str(versao))
-		etapa(3, "Excel no SharePoint/OneDrive", "OK", "O fluxo devolveu o snapshot do arquivo.", tabelas={k: len(v) for k, v in snapshot.items()})
-		resultado["status_final"] = "SUCESSO"
-		resultado["mensagem_final"] = "Vercel → Power Automate → Excel está funcionando."
-		return jsonify(resultado), 200
+		conn = conectar()
+		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+		return jsonify({"status": "SUCESSO", "modo": "Excel + SQLite local", "arquivo": PLANILHA, "tabelas": contagens, "mensagem": "A aplicação está funcionando sem integração externa."})
 	except Exception as erro:
-		etapa(2, "Power Automate", "ERRO", str(erro))
-		resultado["status_final"] = "FALHA_POWER_AUTOMATE"
-		resultado["mensagem_final"] = "Verifique o fluxo, a conexão do Excel Online (Business), o segredo e as permissões do arquivo."
-		return jsonify(resultado), 500
+		return jsonify({"status": "ERRO", "erro": str(erro)}), 500
+
 
 @app.route("/health")
 def health():
@@ -1646,53 +1233,15 @@ def health():
 
 @app.route("/diagnostico-sync")
 def diagnostico_sync():
-	"""Diagnóstico somente leitura da cadeia Vercel → Power Automate → Excel."""
-	if (resposta := acesso_login()):
-		return resposta
+	if (resposta := acesso_login()): return resposta
 	if not administrador():
 		return jsonify({"status": "FALHA", "erro": "Somente administradores podem executar o diagnóstico."}), 403
-	inicio = datetime.now()
-	config = _diagnostico_configuracao_power_automate()
-	resultado = {"status": "INICIANDO", "somente_leitura": True, "arquivo_configurado": SHAREPOINT_FILE_PATH, "etapas": []}
-	def etapa(numero, nome, status_nome, mensagem, **dados):
-		item = {"numero": numero, "etapa": nome, "status": status_nome, "mensagem": mensagem}; item.update(dados); resultado["etapas"].append(item)
-	if not config["configurada"]:
-		etapa(1, "Configuração Power Automate", "ERRO", "Integração Power Automate incompleta.", faltantes=config["faltantes"])
-		resultado.update(status="FALHA_CONFIGURACAO", mensagem_final="Preencha POWER_AUTOMATE_URL, POWER_AUTOMATE_SECRET e POWER_AUTOMATE_ENABLED no Vercel.")
-		return jsonify(resultado), 500
-	etapa(1, "Configuração Power Automate", "OK", "Fluxo configurado.", modo=config["modo"])
-	try:
-		snapshot, versao = _pa_snapshot_remoto()
-		etapa(2, "Comunicação com o fluxo", "OK", "O Power Automate respondeu ao pedido GET_SNAPSHOT.", versao=str(versao))
-	except Exception as erro:
-		etapa(2, "Comunicação com o fluxo", "ERRO", str(erro))
-		resultado.update(status="FALHA_POWER_AUTOMATE", mensagem_final="Verifique a URL, o segredo e o fluxo no Power Automate.")
-		return jsonify(resultado), 500
-	try:
-		conteudo = _snapshot_para_xlsx(snapshot)
-		workbook = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
-		abas = list(workbook.sheetnames)
-		contagens = {tabela: max(workbook[tabela].max_row - 1, 0) if tabela in abas else None for tabela in TABELAS_EXCEL}
-		workbook.close()
-		faltantes = [aba for aba in TABELAS_EXCEL if aba not in abas]
-		if faltantes:
-			raise RuntimeError("Faltam as abas obrigatórias: " + ", ".join(faltantes))
-		etapa(3, "Estrutura do Excel", "OK", "Snapshot válido e abas obrigatórias encontradas.", abas=abas, contagens_remotas=contagens)
-	except Exception as erro:
-		etapa(3, "Estrutura do Excel", "ERRO", str(erro))
-		resultado.update(status="FALHA_ESTRUTURA_EXCEL", mensagem_final="Verifique a estrutura das abas usuarios, demandas e historico.")
-		return jsonify(resultado), 500
 	try:
 		conn = conectar()
-		contagens_locais = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-		conn.close()
-		etapa(4, "Dados carregados", "OK", "Dados da aplicação disponíveis em memória.", contagens_locais=contagens_locais, contagens_remotas=contagens)
+		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
+		return jsonify({"status": "OK", "somente_leitura": True, "modo": "Excel + SQLite local", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "contagens": contagens, "conclusao": "Diagnóstico concluído sem integração externa."})
 	except Exception as erro:
-		etapa(4, "Dados carregados", "ERRO", str(erro))
-		resultado.update(status="FALHA_DADOS", mensagem_final="Não foi possível validar os dados carregados pela aplicação.")
-		return jsonify(resultado), 500
-	resultado.update(status="OK", duracao_segundos=round((datetime.now() - inicio).total_seconds(), 2), conclusao="Diagnóstico concluído em modo somente leitura. Nenhuma alteração foi executada.")
-	return jsonify(resultado), 200
+		return jsonify({"status": "FALHA", "erro": str(erro)}), 500
 
 
 @app.route("/logout")
