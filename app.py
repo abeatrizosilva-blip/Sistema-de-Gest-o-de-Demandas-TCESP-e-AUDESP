@@ -16,6 +16,7 @@ from unicodedata import normalize as unicode_normalize
 from urllib.request import Request, urlopen
 
 import bcrypt
+import requests
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 try:
