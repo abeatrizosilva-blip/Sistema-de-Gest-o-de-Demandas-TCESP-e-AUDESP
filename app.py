@@ -27,7 +27,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, sen
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
 CAMINHO_ONEDRIVE_WINDOWS = r"C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx"
-PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", CAMINHO_ONEDRIVE_WINDOWS if os.name == "nt" and os.path.exists(CAMINHO_ONEDRIVE_WINDOWS) else "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
+PLANILHA = CAMINHO_ONEDRIVE_WINDOWS
+# IMPORTANTE: a planilha acima é o único armazenamento permanente do sistema.
+# Não usar DATABASE/EXCEL_DATABASE nem fallback para outro arquivo.
+
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None
 def _env(*nomes, default=""):
@@ -264,10 +267,11 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=1):
 	"""Aplica a alteração no Excel local e recarrega o banco SQLite."""
 	global CONEXAO_COMPARTILHADA
 	with ARQUIVO_LOCK:
-		if not os.path.exists(PLANILHA):
-			# Cria o arquivo inicial a partir do banco atual.
-			conn = conectar()
-			_salvar_planilha(conn)
+		if not os.path.isfile(PLANILHA):
+			raise FileNotFoundError(
+				f"Planilha configurada não encontrada: {PLANILHA}. "
+			"Verifique se o OneDrive está sincronizado e se o arquivo existe nesse caminho."
+			)
 		workbook = load_workbook(PLANILHA)
 		try:
 			resultado = mutator(workbook)
@@ -1298,6 +1302,14 @@ def logout():
 
 
 criar_banco()
+
+# Diagnóstico inicial: evita que o sistema rode silenciosamente gravando em outro arquivo.
+if not os.path.isfile(PLANILHA):
+	print("\n[ERRO] PLANILHA DO SISTEMA NÃO ENCONTRADA")
+	print(f"[ERRO] Caminho configurado: {PLANILHA}")
+	print("[ERRO] Verifique o OneDrive e confirme se o arquivo está disponível localmente.\n")
+else:
+	print(f"[OK] Planilha utilizada pelo sistema: {PLANILHA}")
 
 if __name__ == "__main__":
 	app.run(host="0.0.0.0", port=5000, debug=False)
