@@ -361,11 +361,18 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=1):
 			"Verifique se o OneDrive está sincronizado e se o arquivo existe nesse caminho."
 			)
 		workbook = load_workbook(PLANILHA)
+		temp_path = None
 		try:
 			resultado = mutator(workbook)
-			workbook.save(PLANILHA)
+			diretorio = os.path.dirname(os.path.abspath(PLANILHA))
+			with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=diretorio, delete=False) as temporario:
+				temp_path = temporario.name
+			workbook.save(temp_path)
+			os.replace(temp_path, PLANILHA)
 		finally:
 			workbook.close()
+			if temp_path and os.path.exists(temp_path):
+				os.unlink(temp_path)
 		# Recria apenas o índice temporário em memória a partir da planilha.
 		if CONEXAO_COMPARTILHADA is not None:
 			CONEXAO_COMPARTILHADA._conn.close()
@@ -1402,5 +1409,7 @@ else:
 	print(f"[OK] Planilha utilizada pelo sistema: {PLANILHA}")
 
 if __name__ == "__main__":
-	app.run(host="0.0.0.0", port=5000, debug=False)
+	# Modo compatível: o servidor escuta na rede local.
+	# O .bat preferencial usa Waitress para atender mais de um usuário.
+	app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 

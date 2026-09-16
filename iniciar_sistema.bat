@@ -7,6 +7,7 @@ cd /d "%~dp0"
 
 echo ===============================================
 echo   Sistema de Gestao - SP Aguas
+echo   Modo: servidor para a rede local
 echo ===============================================
 echo.
 echo Pasta do sistema: %CD%
@@ -14,13 +15,11 @@ echo.
 
 if not exist "%~dp0app.py" (
     echo ERRO: app.py nao foi encontrado nesta pasta.
-    echo Extraia TODOS os arquivos do ZIP antes de executar este arquivo.
     pause
     exit /b 1
 )
 if not exist "%~dp0requirements.txt" (
     echo ERRO: requirements.txt nao foi encontrado nesta pasta.
-    echo Extraia TODOS os arquivos do ZIP antes de executar este arquivo.
     pause
     exit /b 1
 )
@@ -41,20 +40,16 @@ if %errorlevel%==0 (
 )
 
 if not exist "%~dp0.venv\Scripts\python.exe" (
-    echo Ambiente virtual nao encontrado.
     echo Criando o ambiente virtual pela primeira vez...
-    echo.
     %PYTHON% -m venv "%~dp0.venv"
     if errorlevel 1 (
-        echo.
         echo ERRO ao criar o ambiente virtual.
         pause
         exit /b 1
     )
-    echo Ambiente virtual criado com sucesso.
-    echo.
 )
 
+echo.
 echo Verificando dependencias...
 "%~dp0.venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :erro_pip
@@ -62,14 +57,32 @@ if errorlevel 1 goto :erro_pip
 if errorlevel 1 goto :erro_pip
 
 echo.
-echo Dependencias prontas.
-echo Iniciando o sistema...
+echo ===============================================
+echo   SISTEMA DISPONIVEL NA REDE LOCAL
+echo ===============================================
+echo.
+echo Neste computador:
+echo   http://127.0.0.1:5000
+echo.
+echo Enderecos IPv4 deste computador:
+ipconfig | findstr /i "IPv4"
+echo.
+echo Para a outra pessoa acessar, use no navegador:
+echo   http://IP-DESTE-COMPUTADOR:5000
+
+echo.
+echo IMPORTANTE:
+echo   - Nao abra a planilha no Excel enquanto o sistema estiver gravando.
+echo   - Este computador precisa permanecer ligado com esta janela aberta.
+echo   - O outro usuario NAO precisa instalar o sistema; apenas abrir o navegador.
 echo.
 start "" http://127.0.0.1:5000
-"%~dp0.venv\Scripts\python.exe" "%~dp0app.py"
+
+"%~dp0.venv\Scripts\python.exe" -m waitress --host=0.0.0.0 --port=5000 --threads=8 app:app
+
 if errorlevel 1 (
     echo.
-    echo O sistema foi encerrado com erro.
+    echo O servidor foi encerrado com erro.
 )
 pause
 exit /b 0
