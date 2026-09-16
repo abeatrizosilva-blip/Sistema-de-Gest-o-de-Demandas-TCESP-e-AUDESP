@@ -1113,7 +1113,6 @@ DOE_KEYWORDS = [
     "PAOLA SANCHEZ VALLEJO DE MORAES FORJAZ", "Ana Paula Zubiaurre Brites",
     "Anderson Barboza Esteves", "Nelson de Campos Lima", "Adriano Rafael Arre­pia de Queiroz",
 ]
-DOE_BASE_URL = "https://doe.tce.sp.gov.br/v/pdf/{ano:04d}/{mes:02d}/doe-tce-{data}.pdf"
 
 def _normalizar_pesquisa_doe(texto):
     texto = unicode_normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode("ascii")
@@ -1121,129 +1120,151 @@ def _normalizar_pesquisa_doe(texto):
 
 def _url_pdf_doe(data_iso):
     dt = datetime.strptime(data_iso, "%Y-%m-%d").date()
-    return DOE_BASE_URL.format(ano=dt.year, mes=dt.month, data=dt.strftime("%Y-%m-%d"))
+    return f"https://doe.tce.sp.gov.br/v/pdf/{dt.year:04d}/{dt.month:02d}/doe-tce-{dt:%Y-%m-%d}.pdf"
 
-def _download_doe_pdf(url):
-    """Baixa o PDF do DOE de forma resiliente.
-
-    Alguns endpoints do doe.tce.sp.gov.br encerram a resposta HTTP antes do
-    corpo completo quando acessados por ambientes serverless. Por isso usamos
-    requests, desabilitamos compressão e validamos o marcador final do PDF,
-    repetindo a operação quando o arquivo chega incompleto.
-    """
+def _download_pdf_url(url):
+    """Baixa um PDF informado pelo usuário, sem depender da data do DOE."""
+    url = (url or "").strip()
+    if not (url.startswith("https://") or url.startswith("http://")):
+        raise ValueError("Informe um link HTTP/HTTPS válido para o PDF.")
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; SP-AGUAS/1.0)",
-        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Accept": "application/pdf,application/octet-stream,*/*;q=0.8",
         "Accept-Encoding": "identity",
         "Connection": "close",
     }
-    ultimo_erro = None
+    ultimo = None
     for tentativa in range(1, 4):
         try:
-            if requests is not None:
-                with requests.get(url, headers=headers, timeout=(10, 60), stream=True, allow_redirects=True) as r:
-                    if r.status_code == 404:
-                        raise FileNotFoundError("PDF não encontrado")
-                    r.raise_for_status()
-                    partes = []
-                    total = 0
-                    for bloco in r.iter_content(chunk_size=64 * 1024):
-                        if bloco:
-                            partes.append(bloco)
-                            total += len(bloco)
-                    conteudo = b"".join(partes)
-            else:
-                req = Request(url, headers=headers)
-                with urlopen(req, timeout=60) as resposta:
-                    conteudo = resposta.read()
-
+            with requests.get(url, headers=headers, timeout=(10, 90), stream=True, allow_redirects=True) as r:
+                r.raise_for_status()
+                partes = []
+                for bloco in r.iter_content(chunk_size=64 * 1024):
+                    if bloco:
+                        partes.append(bloco)
+                conteudo = b"".join(partes)
             if not conteudo.startswith(b"%PDF"):
-                raise RuntimeError("O servidor não retornou um PDF válido.")
-            if b"%%EOF" not in conteudo[-4096:]:
+                raise RuntimeError("O link não retornou um arquivo PDF. Confira se o link é direto para o PDF.")
+            if b"%%EOF" not in conteudo[-8192:]:
                 raise RuntimeError(f"O PDF foi recebido incompleto ({len(conteudo)} bytes).")
             return conteudo
-        except FileNotFoundError as exc:
-            raise RuntimeError("A edição PDF não foi encontrada para essa data.") from exc
         except Exception as exc:
-            ultimo_erro = exc
+            ultimo = exc
             if tentativa < 3:
-                time.sleep(0.8 * tentativa)
-    raise RuntimeError(f"Não foi possível baixar o PDF completo do DOE-TCESP após 3 tentativas: {ultimo_erro}")
+                time.sleep(0.7 * tentativa)
+    raise RuntimeError(f"Não foi possível baixar o PDF informado: {ultimo}")
 
-def _buscar_doe_pdf(data_publicacao_iso):
-    """Localiza o PDF pela data de PUBLICAÇÃO, não apenas pela data do arquivo.
-
-    O TCESP informa no próprio PDF uma data de disponibilização e uma data de
-    publicação. O nome do arquivo usa a data de disponibilização. Assim, para
-    uma data de publicação informada pelo usuário, procuramos os dias anteriores
-    (incluindo a própria data) até encontrar a edição cuja publicação coincida.
-    """
-    dt = datetime.strptime(data_publicacao_iso, "%Y-%m-%d").date()
-    erros = []
-    for atraso in range(0, 8):
-        candidata = dt - timedelta(days=atraso)
-        url = _url_pdf_doe(candidata.strftime("%Y-%m-%d"))
-        try:
-            conteudo = _download_doe_pdf(url)
-            try:
-                leitor = PdfReader(io.BytesIO(conteudo))
-                cabecalho = " ".join((leitor.pages[0].extract_text() or "").split()) if leitor.pages else ""
-            except Exception:
-                cabecalho = ""
-            data_pub = re.search(r"(?:Data de publicação|Publicação)\s*[:—-]?\s*(\d{2}/\d{2}/\d{4})", cabecalho, re.I)
-            if data_pub:
-                publicada = datetime.strptime(data_pub.group(1), "%d/%m/%Y").date()
-                if publicada != dt:
-                    erros.append(f"{candidata}: publicação {publicada.strftime('%d/%m/%Y')}")
-                    continue
-            return conteudo, url, candidata.strftime("%Y-%m-%d")
-        except Exception as exc:
-            erros.append(f"{candidata}: {exc}")
-    raise RuntimeError("Não foi encontrada uma edição do DOE-TCESP correspondente à data de publicação informada. Verifique a data.\n" + "\n".join(erros[-3:]))
+def _extrair_metadados_pdf(reader, texto_inicial=""):
+    cabecalho = " ".join((texto_inicial or "").split())
+    data_publicacao = ""
+    data_disponibilizacao = ""
+    edicao = "DOE-TCESP"
+    for padrao in (
+        r"(?:Data de publicação|Data da publicação|Publicação)\s*[:—-]?\s*(\d{2}/\d{2}/\d{4})",
+        r"(?:publica[çc][ãa]o)\s*(?:em|:)?\s*(\d{2}/\d{2}/\d{4})",
+    ):
+        m = re.search(padrao, cabecalho, re.I)
+        if m:
+            data_publicacao = m.group(1)
+            break
+    m = re.search(r"(?:disponibiliza[çc][ãa]o|disponibilizado)\s*(?:em|:)?\s*(\d{2}/\d{2}/\d{4})", cabecalho, re.I)
+    if m:
+        data_disponibilizacao = m.group(1)
+    m = re.search(r"(?:EDI[ÇC][ÃA]O|Edi[çc][ãa]o)\s*(?:n[ºo°]?\s*)?(\d+)", cabecalho, re.I)
+    if m:
+        edicao = f"DOE-TCESP nº {m.group(1)}"
+    return {"data_publicacao": data_publicacao, "data_disponibilizacao": data_disponibilizacao, "edicao": edicao}
 
 def _processos_no_texto(texto):
     encontrados = []
-    for padrao in (r"\b(?:TC|TCESP|eTC|ETC)[-\s]?\d{1,8}[/.-]\d{1,4}[/.-]\d{2,4}\b", r"\b\d{5,8}/\d{2,4}\b"):
-        encontrados.extend(re.findall(padrao, texto, flags=re.I))
-    vistos=[]
+    padroes = (
+        r"\b(?:e?TC|TCESP)[-\s]?\d{1,8}[/.-]\d{1,4}[/.-]\d{2,4}\b",
+        r"\b\d{5,8}/\d{2,4}\b",
+    )
+    for padrao in padroes:
+        encontrados.extend(re.findall(padrao, texto or "", flags=re.I))
+    vistos = []
     for item in encontrados:
-        item=re.sub(r"\s+","",item)
-        if item not in vistos: vistos.append(item)
-    return vistos[:10]
+        item = re.sub(r"\s+", "", item)
+        if item not in vistos:
+            vistos.append(item)
+    return vistos[:20]
 
-def _extrair_ocorrencias_doe(conteudo, data_iso, url, palavra_chave=""):
+def _extrair_ocorrencias_doe(conteudo, data_iso="", url="", palavra_chave=""):
     if PdfReader is None:
         raise RuntimeError("Dependência pypdf não instalada. Execute pip install -r requirements.txt.")
-    try: reader=PdfReader(io.BytesIO(conteudo))
-    except Exception as exc: raise RuntimeError(f"Não foi possível ler o PDF do DOE-TCESP: {exc}") from exc
-    termos=[palavra_chave] if palavra_chave else DOE_KEYWORDS
-    resultados=[]
-    for pagina_num,page in enumerate(reader.pages,start=1):
-        try: texto=page.extract_text() or ""
-        except Exception: texto=""
-        normalizado=_normalizar_pesquisa_doe(texto)
-        if not normalizado: continue
-        for termo in termos:
-            alvo=_normalizar_pesquisa_doe(termo); pos=normalizado.find(alvo)
-            if pos<0: continue
-            inicio=max(0,pos-280); fim=min(len(texto),pos+len(termo)+420)
-            trecho=" ".join(texto[inicio:fim].split())
-            resultados.append({"data":data_iso,"edicao":"DOE-TCESP","secao":f"Página {pagina_num}","palavra_chave":termo,"trecho":trecho,"pagina":pagina_num,"url":url,"processos":_processos_no_texto(trecho)})
-    return resultados[:100]
-
-@app.route("/api/doe-tcesp/pesquisar")
-def pesquisar_doe_tcesp():
-    if (resposta := acesso_login()): return resposta
-    data_iso=request.args.get("data","").strip(); palavra=request.args.get("palavra_chave","").strip()
-    try: datetime.strptime(data_iso,"%Y-%m-%d")
-    except ValueError: return jsonify({"erro":"Informe uma data válida no formato AAAA-MM-DD.","resultados":[]}),400
-    if palavra and _normalizar_pesquisa_doe(palavra) not in {_normalizar_pesquisa_doe(k) for k in DOE_KEYWORDS}:
-        return jsonify({"erro":"Palavra-chave não cadastrada.","resultados":[]}),400
     try:
-        pdf,url,data_arquivo=_buscar_doe_pdf(data_iso); resultados=_extrair_ocorrencias_doe(pdf,data_iso,url,palavra)
-        return jsonify({"data":data_iso,"data_arquivo":data_arquivo,"url":url,"resultados":resultados})
+        reader = PdfReader(io.BytesIO(conteudo))
     except Exception as exc:
-        return jsonify({"erro":str(exc),"resultados":[]}),502
+        raise RuntimeError(f"Não foi possível ler o PDF: {exc}") from exc
+    textos = []
+    for pagina_num, page in enumerate(reader.pages, start=1):
+        try:
+            texto = page.extract_text() or ""
+        except Exception:
+            texto = ""
+        textos.append(texto)
+    texto_inicial = " ".join(textos[:2])
+    meta = _extrair_metadados_pdf(reader, texto_inicial)
+    termos = [palavra_chave] if palavra_chave else DOE_KEYWORDS
+    resultados = []
+    for pagina_num, texto in enumerate(textos, start=1):
+        normalizado = _normalizar_pesquisa_doe(texto)
+        if not normalizado:
+            continue
+        for termo in termos:
+            alvo = _normalizar_pesquisa_doe(termo)
+            if not alvo:
+                continue
+            pos = normalizado.find(alvo)
+            if pos < 0:
+                continue
+            inicio = max(0, pos - 420)
+            fim = min(len(texto), pos + len(termo) + 650)
+            trecho = " ".join(texto[inicio:fim].split())
+            resultados.append({
+                "data": data_iso or meta["data_publicacao"],
+                "data_publicacao": meta["data_publicacao"],
+                "data_disponibilizacao": meta["data_disponibilizacao"],
+                "edicao": meta["edicao"],
+                "secao": f"Página {pagina_num}",
+                "palavra_chave": termo,
+                "trecho": trecho,
+                "pagina": pagina_num,
+                "url": url,
+                "processos": _processos_no_texto(trecho),
+            })
+    return resultados[:200], meta, len(textos), any(bool(t.strip()) for t in textos)
+
+@app.route("/api/doe-tcesp/extrair", methods=["POST"])
+def extrair_doe_tcesp():
+    if (resposta := acesso_login()): return resposta
+    palavra = (request.form.get("palavra_chave") or "").strip()
+    if palavra and _normalizar_pesquisa_doe(palavra) not in {_normalizar_pesquisa_doe(k) for k in DOE_KEYWORDS}:
+        return jsonify({"erro": "Palavra-chave não cadastrada.", "resultados": []}), 400
+    try:
+        arquivo = request.files.get("pdf")
+        link = (request.form.get("url") or "").strip()
+        if arquivo and arquivo.filename:
+            if not arquivo.filename.lower().endswith(".pdf"):
+                return jsonify({"erro": "Selecione um arquivo PDF.", "resultados": []}), 400
+            conteudo = arquivo.read()
+            if not conteudo.startswith(b"%PDF"):
+                return jsonify({"erro": "O arquivo selecionado não parece ser um PDF válido.", "resultados": []}), 400
+            if len(conteudo) > 12 * 1024 * 1024:
+                return jsonify({"erro": "O PDF é maior que 12 MB. Use o link direto da publicação.", "resultados": []}), 413
+            url = ""
+        elif link:
+            conteudo = _download_pdf_url(link)
+            url = link
+        else:
+            return jsonify({"erro": "Envie um PDF ou informe o link da publicação.", "resultados": []}), 400
+        resultados, meta, paginas, possui_texto = _extrair_ocorrencias_doe(conteudo, url=url, palavra_chave=palavra)
+        if not possui_texto:
+            return jsonify({"erro": "O PDF foi recebido, mas não possui texto pesquisável. Se for uma publicação digitalizada, será necessário OCR.", "resultados": [], "meta": meta}), 422
+        return jsonify({"resultados": resultados, "meta": meta, "paginas": paginas, "url": url})
+    except Exception as exc:
+        return jsonify({"erro": str(exc), "resultados": []}), 502
 
 @app.route("/nova-demanda", methods=["GET", "POST"])
 def nova_demanda():
@@ -1282,20 +1303,21 @@ def formulario(demanda=None):
 <div class="full"><label>Assunto</label><textarea name="assunto" required placeholder="Descreva de forma objetiva o assunto da demanda">{valor("assunto")}</textarea></div>
 </div></div>
 <div class="form-section"><h3>Publicação diária — DOE-TCESP</h3>
-<p class="muted">Pesquise a edição oficial do Diário Oficial do TCESP por data e pelas palavras-chave cadastradas.</p>
+<p class="muted">Em vez de o sistema procurar o DOE automaticamente, informe o link direto da publicação ou envie o PDF do dia. O sistema lerá o documento e localizará as palavras-chave e números de processo.</p>
 <div class="form-grid">
-<div><label>Data da publicação</label><input type="date" id="doe_pesquisa_data" value="{valor("doe_data")}"></div>
+<div class="full"><label>Link da publicação/PDF</label><input type="url" id="doe_link" placeholder="Cole aqui o link direto do PDF do DOE-TCESP"></div>
+<div><label>Ou selecione o PDF</label><input type="file" id="doe_pdf" accept="application/pdf"></div>
 <div><label>Palavra-chave</label><select id="doe_pesquisa_keyword"><option value="">Todas as palavras-chave</option></select></div>
-<div class="full"><button type="button" class="btn btn-outline" onclick="pesquisarDOE()">🔎 Pesquisar publicação do DOE-TCESP</button></div>
+<div class="full"><button type="button" class="btn btn-outline" onclick="extrairDOE()">📄 Ler publicação e extrair dados</button></div>
 </div>
 <div id="doe_status" class="muted" style="margin-top:10px"></div><div id="doe_resultados" style="margin-top:12px"></div>
 <div class="form-grid" style="margin-top:12px">
-<div><label>Data DOE</label><input name="doe_data" id="doe_data" value="{valor("doe_data")}" readonly></div>
+<div><label>Data DOE</label><input name="doe_data" id="doe_data" value="{valor("doe_data")}" placeholder="AAAA-MM-DD"></div>
 <div><label>Edição DOE</label><input name="doe_edicao" id="doe_edicao" value="{valor("doe_edicao")}" placeholder="Ex.: edição diária"></div>
 <div><label>Seção DOE</label><input name="doe_secao" id="doe_secao" value="{valor("doe_secao")}"></div>
 <div><label>Palavra-chave encontrada</label><input name="doe_palavra_chave" id="doe_palavra_chave" value="{valor("doe_palavra_chave")}" readonly></div>
 <div class="full"><label>Publicação / trecho localizado</label><textarea name="doe_publicacao" id="doe_publicacao" placeholder="O trecho da publicação selecionada aparecerá aqui.">{valor("doe_publicacao")}</textarea></div>
-<div class="full"><label>Link oficial da publicação</label><input name="doe_url" id="doe_url" value="{valor("doe_url")}" readonly></div>
+<div class="full"><label>Link oficial da publicação</label><input name="doe_url" id="doe_url" value="{valor("doe_url")}" placeholder="Link do PDF ou da publicação"></div>
 </div></div>
 <div class="form-section"><h3>Responsabilidade</h3><div class="form-grid"><div><label>Área</label><input name="area" value="{valor("area")}" placeholder="Área responsável"></div><div><label>Responsável</label><input name="responsavel" value="{valor("responsavel")}" placeholder="Nome do responsável"></div></div></div>
 <div class="form-section"><h3>Prazos e classificação</h3><div class="form-grid three">
@@ -1313,27 +1335,46 @@ const DOE_KEYWORDS = {doe_keywords};
   const select = document.getElementById("doe_pesquisa_keyword");
   DOE_KEYWORDS.forEach(k => {{ const o=document.createElement("option"); o.value=k; o.textContent=k; if(k===document.getElementById("doe_palavra_chave").value)o.selected=true; select.appendChild(o); }});
 }})();
-async function pesquisarDOE() {{
-  const data=document.getElementById("doe_pesquisa_data").value, palavra=document.getElementById("doe_pesquisa_keyword").value;
+async function extrairDOE() {{
+  const link=document.getElementById("doe_link").value.trim();
+  const arquivo=document.getElementById("doe_pdf").files[0];
+  const palavra=document.getElementById("doe_pesquisa_keyword").value;
   const status=document.getElementById("doe_status"), box=document.getElementById("doe_resultados");
-  if(!data) {{ status.textContent="Informe a data da edição que deseja pesquisar."; return; }}
-  status.textContent="Consultando a publicação oficial do DOE-TCESP..."; box.innerHTML="";
+  if(!link && !arquivo) {{ status.textContent="Informe o link do PDF ou selecione um PDF."; return; }}
+  const form=new FormData();
+  if(arquivo) form.append("pdf", arquivo);
+  if(link) form.append("url", link);
+  form.append("palavra_chave", palavra);
+  status.textContent="Lendo o PDF e procurando as palavras-chave..."; box.innerHTML="";
   try {{
-    const r=await fetch("/api/doe-tcesp/pesquisar?data="+encodeURIComponent(data)+"&palavra_chave="+encodeURIComponent(palavra));
-    const j=await r.json(); if(!r.ok) throw new Error(j.erro||"Não foi possível consultar o DOE.");
-    if(!j.resultados.length) box.innerHTML='<div class="empty"><strong>Nenhuma ocorrência encontrada.</strong>Não foi localizada publicação com os filtros informados nessa edição.</div>';
-    else {{
-      box.innerHTML=j.resultados.map((item,i)=>`<div class="alerta normal" style="margin-top:8px"><strong>${{escapeHtml(item.palavra_chave)}}</strong><div class="muted">Página ${{item.pagina}} · ${{escapeHtml(item.data)}} · ${{escapeHtml(item.url)}}</div><div style="margin-top:6px">${{escapeHtml(item.trecho)}}</div>${{item.processos&&item.processos.length?'<div class="muted" style="margin-top:6px">Processo(s): '+escapeHtml(item.processos.join(", "))+'</div>':''}}<button type="button" class="btn" style="margin-top:9px" onclick="usarDOE(${{i}})">Usar esta publicação</button></div>`).join("");
-      window._doeResultados=j.resultados; status.textContent=`${{j.resultados.length}} ocorrência(s) encontrada(s).`;
+    const r=await fetch("/api/doe-tcesp/extrair", {{method:"POST", body:form}});
+    const j=await r.json(); if(!r.ok) throw new Error(j.erro||"Não foi possível ler o PDF.");
+    if(j.meta) {{
+      document.getElementById("doe_edicao").value=j.meta.edicao||document.getElementById("doe_edicao").value;
+      if(j.meta.data_publicacao) document.getElementById("doe_data").value=j.meta.data_publicacao.split("/").reverse().join("-");
+    }}
+    if(!j.resultados.length) {{
+      box.innerHTML='<div class="empty"><strong>Nenhuma palavra-chave encontrada.</strong>O PDF foi lido, mas nenhum dos termos selecionados foi localizado no texto extraído.</div>';
+      status.textContent="PDF lido sem ocorrências.";
+    }} else {{
+      window._doeResultados=j.resultados;
+      box.innerHTML=j.resultados.map((item,i)=>`<div class="alerta normal" style="margin-top:8px"><strong>${{escapeHtml(item.palavra_chave)}}</strong><div class="muted">${{escapeHtml(item.secao)}}${{item.data_publicacao?' · Publicação: '+escapeHtml(item.data_publicacao):''}}</div><div style="margin-top:6px">${{escapeHtml(item.trecho)}}</div>${{item.processos&&item.processos.length?'<div class="muted" style="margin-top:6px"><strong>Processo(s):</strong> '+escapeHtml(item.processos.join(", "))+'</div>':''}}<button type="button" class="btn" style="margin-top:9px" onclick="usarDOE(${{i}})">Usar esta ocorrência</button></div>`).join("");
+      status.textContent=`${{j.resultados.length}} ocorrência(s) encontrada(s) em ${{j.paginas}} página(s).`;
+      if(j.url) document.getElementById("doe_url").value=j.url;
     }}
   }} catch(e) {{ status.textContent="Erro: "+e.message; }}
 }}
 function usarDOE(i) {{
-  const item=window._doeResultados[i];
-  document.getElementById("doe_data").value=item.data; document.getElementById("doe_edicao").value=item.edicao||"";
-  document.getElementById("doe_secao").value=item.secao||""; document.getElementById("doe_palavra_chave").value=item.palavra_chave||"";
-  document.getElementById("doe_publicacao").value=item.trecho||""; document.getElementById("doe_url").value=item.url||"";
-  if(!document.querySelector('input[name="numero"]').value && item.processos&&item.processos.length) document.querySelector('input[name="numero"]').value=item.processos[0];
+  const item=window._doeResultados[i]; if(!item) return;
+  const data=item.data_publicacao ? item.data_publicacao.split("/").reverse().join("-") : (item.data||"");
+  document.getElementById("doe_data").value=data;
+  document.getElementById("doe_edicao").value=item.edicao||"";
+  document.getElementById("doe_secao").value=item.secao||"";
+  document.getElementById("doe_palavra_chave").value=item.palavra_chave||"";
+  document.getElementById("doe_publicacao").value=item.trecho||"";
+  if(item.url) document.getElementById("doe_url").value=item.url;
+  const proc=item.processos&&item.processos.length?item.processos[0]:"";
+  if(proc && !document.querySelector('input[name="numero"]').value) document.querySelector('input[name="numero"]').value=proc;
 }}
 function escapeHtml(v) {{ return String(v??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}}[c])); }}
 </script>"""
