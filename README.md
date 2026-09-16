@@ -1,47 +1,17 @@
-# SP ÁGUAS — Sistema de Gestão de Demandas TCESP e AUDESP
+# SP ÁGUAS — Excel Local v12
 
-## Persistência em uma única planilha Excel
+Versão corrigida para planilha Excel no OneDrive local.
 
-Esta versão foi preparada para uso **local no computador que possui o OneDrive sincronizado**.
+## Correção desta versão
 
-A planilha utilizada pelo sistema é:
+Corrigido o erro `StopIteration` que ocorria na inicialização quando uma das abas `usuarios`, `demandas` ou `historico` estava vazia.
 
-```text
-C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx
-```
+O sistema agora:
+- cria automaticamente as abas ausentes;
+- cria os cabeçalhos quando a aba está vazia;
+- acrescenta colunas novas quando a planilha é de uma versão anterior;
+- preserva os dados existentes;
+- usa somente a planilha configurada como persistência permanente.
 
-O sistema grava diretamente nesse arquivo as alterações realizadas pela aplicação. Não há Power Automate, Microsoft Graph, SharePoint API ou banco SQLite em arquivo.
-
-O SQLite que aparece internamente no código é **somente memória RAM**, usado como mecanismo temporário para manter as consultas existentes. Ele é recriado a partir do Excel ao iniciar a aplicação e depois de cada alteração. Nenhum arquivo `.db` é criado ou usado para persistência.
-
-### Dados persistidos no Excel
-
-- `usuarios`: cadastro, aprovação, ativação/bloqueio e demais alterações de usuários.
-- `demandas`: cadastro, edição e exclusão de demandas, incluindo ETC e informações do DOE-TCESP.
-- `historico`: movimentações e alterações registradas pelo sistema.
-
-### Requisito
-
-O computador precisa estar com o OneDrive sincronizado e a planilha disponível nesse caminho.
-
-Se o arquivo estiver aberto no Excel, o sistema poderá não conseguir substituí-lo em algumas situações. Recomenda-se fechar a planilha durante o uso do sistema.
-
-### Iniciar
-
-Execute `iniciar_sistema.bat`. O arquivo já aponta para o caminho da planilha acima.
-
-### DOE-TCESP
-
-Na tela Nova Demanda, é possível inserir o link de uma publicação/PDF ou selecionar um PDF local. O sistema extrai o texto, procura as palavras-chave cadastradas e permite usar a ocorrência encontrada para preencher os dados da demanda.
-
-### Dependências
-
-- Flask
-- openpyxl
-- bcrypt
-- pypdf
-- requests
-
-
-## Localização automática da planilha
-A aplicação procura primeiro o caminho configurado e depois as variáveis OneDriveCommercial/OneDrive e as pastas padrão do OneDrive, evitando depender do nome exibido no Explorador de Arquivos.
+Planilha configurada:
+`C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx`

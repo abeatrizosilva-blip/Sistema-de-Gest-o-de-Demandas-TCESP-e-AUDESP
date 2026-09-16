@@ -180,16 +180,55 @@ def _criar_esquema(conn):
 	""")
 
 
+def _garantir_estrutura_planilha():
+	"""Garante que o XLSX tenha as três abas e todos os cabeçalhos necessários.
+	Aceita planilhas novas/vazias e planilhas antigas sem as colunas adicionadas pelo sistema.
+	"""
+	if not os.path.isfile(PLANILHA):
+		raise FileNotFoundError(f"Planilha configurada não encontrada: {PLANILHA}")
+	workbook = load_workbook(PLANILHA)
+	alterado = False
+	try:
+		# Remove apenas a planilha padrão vazia quando ela não faz parte do sistema.
+		for tabela, colunas in TABELAS_EXCEL.items():
+			if tabela not in workbook.sheetnames:
+				ws = workbook.create_sheet(tabela)
+				ws.append(list(colunas))
+				alterado = True
+				continue
+			ws = workbook[tabela]
+			if ws.max_row == 0 or all(ws.cell(1, c).value is None for c in range(1, max(1, ws.max_column) + 1)):
+				ws.delete_rows(1, ws.max_row) if ws.max_row else None
+				ws.append(list(colunas))
+				alterado = True
+				cabecalho = list(colunas)
+			else:
+				cabecalho = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+				for coluna in colunas:
+					if coluna not in cabecalho:
+						ws.cell(1, ws.max_column + 1).value = coluna
+						cabecalho.append(coluna)
+						alterado = True
+		if alterado:
+			workbook.save(PLANILHA)
+	finally:
+		workbook.close()
+
+
 def _carregar_planilha(conn):
 	if not os.path.exists(PLANILHA):
 		return False
+	_garantir_estrutura_planilha()
 	workbook = load_workbook(PLANILHA, read_only=True, data_only=True)
 	try:
 		for tabela, colunas in TABELAS_EXCEL.items():
 			if tabela not in workbook.sheetnames:
 				continue
 			planilha = workbook[tabela]
-			cabecalho = [celula.value for celula in next(planilha.iter_rows(min_row=1, max_row=1))]
+			primeira_linha = next(planilha.iter_rows(min_row=1, max_row=1, values_only=True), None)
+			if primeira_linha is None:
+				continue
+			cabecalho = list(primeira_linha)
 			indices = {nome: cabecalho.index(nome) for nome in colunas if nome in cabecalho}
 			for linha in planilha.iter_rows(min_row=2, values_only=True):
 				if not any(valor is not None for valor in linha):
@@ -277,7 +316,9 @@ def agora():
 
 
 def _cabecalho_planilha(planilha):
-	return [celula.value for celula in next(planilha.iter_rows(min_row=1, max_row=1))]
+	"""Lê o cabeçalho sem lançar StopIteration em abas vazias."""
+	primeira_linha = next(planilha.iter_rows(min_row=1, max_row=1, values_only=True), None)
+	return list(primeira_linha) if primeira_linha is not None else []
 
 
 def _linha_por_id(planilha, cabecalho, registro_id):
