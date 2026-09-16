@@ -281,6 +281,73 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=1):
 		return {"status": "OK", **(resultado if isinstance(resultado, dict) else {"resultado": resultado})}
 
 
+def salvar_demanda_atomicamente(valores, usuario_id, tentativas=3):
+	"""
+	Salva uma nova demanda diretamente na planilha Excel local.
+
+	O nome da função é mantido por compatibilidade com a rota de cadastro,
+	mas não há API externa, Power Automate, Graph ou banco em arquivo.
+	A demanda e o primeiro registro do histórico são gravados no mesmo
+	workbook e, em seguida, o índice SQLite em memória é recarregado.
+	"""
+	if len(valores) != 18:
+		raise ValueError(f"Quantidade inesperada de campos da demanda: {len(valores)}")
+
+	def mutator(workbook):
+		# Garante que as abas existam mesmo se a planilha original for antiga.
+		for tabela, colunas in TABELAS_EXCEL.items():
+			if tabela not in workbook.sheetnames:
+				ws = workbook.create_sheet(tabela)
+				ws.append(list(colunas))
+
+		planilha = workbook["demandas"]
+		cabecalho = _cabecalho_planilha(planilha)
+		demanda_id = _proximo_id(planilha, cabecalho)
+		agora_valor = agora()
+		campos_form = (
+			"numero_processo", "numero_etc", "origem", "assunto", "area",
+			"responsavel", "data_recebimento", "prazo_area", "prazo_fatal",
+			"situacao", "prioridade", "observacoes", "doe_data", "doe_edicao",
+			"doe_secao", "doe_palavra_chave", "doe_publicacao", "doe_url"
+		)
+		registro = dict(zip(campos_form, valores))
+		registro.update({
+			"id": demanda_id,
+			"criado_por": usuario_id,
+			"criado_em": agora_valor,
+			"atualizado_em": agora_valor,
+		})
+		_append_registro(planilha, TABELAS_EXCEL["demandas"], registro)
+
+		historico = workbook["historico"]
+		historico_id = _proximo_id(historico, _cabecalho_planilha(historico))
+		registro_historico = {
+			"id": historico_id,
+			"demanda_id": demanda_id,
+			"usuario_id": usuario_id,
+			"acao": "CRIACAO",
+			"descricao": "Demanda cadastrada.",
+			"data_hora": agora_valor,
+		}
+		_append_registro(historico, TABELAS_EXCEL["historico"], registro_historico)
+		return {"demanda_id": demanda_id, "historico_id": historico_id}
+
+	ultimo_erro = None
+	for _ in range(max(1, tentativas)):
+		try:
+			return executar_mutacao_atomica(mutator)
+		except PermissionError as exc:
+				ultimo_erro = exc
+				# O arquivo pode estar temporariamente bloqueado pelo Excel/OneDrive.
+				time.sleep(0.8)
+		except OSError as exc:
+				ultimo_erro = exc
+				time.sleep(0.8)
+	if ultimo_erro:
+		raise RuntimeError(f"Não foi possível salvar a demanda na planilha: {ultimo_erro}") from ultimo_erro
+	raise RuntimeError("Não foi possível salvar a demanda na planilha.")
+
+
 def _append_registro(planilha, colunas, registro):
 	cabecalho = _cabecalho_planilha(planilha)
 	# Migração transparente: acrescenta as novas colunas ao Excel antigo.
