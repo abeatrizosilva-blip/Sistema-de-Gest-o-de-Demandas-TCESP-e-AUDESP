@@ -1,29 +1,38 @@
 # SP ÁGUAS — Sistema de Gestão de Demandas TCESP e AUDESP
 
-## Versão limpa — ETC + DOE-TCESP
+## Persistência em uma única planilha Excel
 
-Aplicação Flask para cadastro e acompanhamento de demandas, com suporte a número ETC e leitura de publicações do DOE-TCESP.
+Esta versão foi preparada para uso **local no computador que possui o OneDrive sincronizado**.
 
-### Persistência
+A planilha utilizada pelo sistema é:
 
-A versão atual **não utiliza Power Automate, Office Scripts, Microsoft Graph ou API do SharePoint**.
+```text
+C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx
+```
 
-Os dados são mantidos no SQLite local (`SQLITE_DATABASE`) e o sistema mantém uma cópia em Excel (`EXCEL_DATABASE`). As alterações feitas pela aplicação são gravadas no Excel e o SQLite é reconstruído para permanecer sincronizado.
+O sistema grava diretamente nesse arquivo as alterações realizadas pela aplicação. Não há Power Automate, Microsoft Graph, SharePoint API ou banco SQLite em arquivo.
 
-> Em Vercel, o sistema de arquivos da função não é um banco persistente. Para produção com persistência entre deploys/execuções, será necessário conectar um banco externo (por exemplo, PostgreSQL/Supabase) em uma etapa posterior.
+O SQLite que aparece internamente no código é **somente memória RAM**, usado como mecanismo temporário para manter as consultas existentes. Ele é recriado a partir do Excel ao iniciar a aplicação e depois de cada alteração. Nenhum arquivo `.db` é criado ou usado para persistência.
+
+### Dados persistidos no Excel
+
+- `usuarios`: cadastro, aprovação, ativação/bloqueio e demais alterações de usuários.
+- `demandas`: cadastro, edição e exclusão de demandas, incluindo ETC e informações do DOE-TCESP.
+- `historico`: movimentações e alterações registradas pelo sistema.
+
+### Requisito
+
+O computador precisa estar com o OneDrive sincronizado e a planilha disponível nesse caminho.
+
+Se o arquivo estiver aberto no Excel, o sistema poderá não conseguir substituí-lo em algumas situações. Recomenda-se fechar a planilha durante o uso do sistema.
+
+### Iniciar
+
+Execute `iniciar_sistema.bat`. O arquivo já aponta para o caminho da planilha acima.
 
 ### DOE-TCESP
 
-Na tela **Nova demanda**, o usuário pode:
-
-- colar o link direto de um PDF oficial do DOE-TCESP; ou
-- selecionar um PDF salvo no computador.
-
-Quando o PDF é selecionado no computador, a leitura ocorre **diretamente no navegador com PDF.js**. Isso evita o limite de tamanho de requisição do Vercel e elimina o erro `Request Entity Too Large`.
-
-Quando é informado um link, o servidor baixa o PDF somente de domínios oficiais do TCESP e extrai o texto com `pypdf`.
-
-O sistema procura as palavras-chave cadastradas, informa página e trecho, identifica números de processo quando encontrados e permite **Usar esta ocorrência** para preencher a demanda.
+Na tela Nova Demanda, é possível inserir o link de uma publicação/PDF ou selecionar um PDF local. O sistema extrai o texto, procura as palavras-chave cadastradas e permite usar a ocorrência encontrada para preencher os dados da demanda.
 
 ### Dependências
 
@@ -32,36 +41,3 @@ O sistema procura as palavras-chave cadastradas, informa página e trecho, ident
 - bcrypt
 - pypdf
 - requests
-
-### Variáveis de ambiente
-
-```text
-SECRET_KEY=UMA_CHAVE_FORTE
-EXCEL_DATABASE=sp_aguas.xlsx
-SQLITE_DATABASE=sp_aguas.db
-```
-
-### Arquivos removidos da arquitetura
-
-Não fazem mais parte desta versão:
-
-- Power Automate
-- Office Script
-- endpoint de integração Power Automate
-- credenciais/segredos Microsoft Graph
-- rotinas de sincronização com SharePoint/OneDrive
-
-### Funcionalidades preservadas
-
-- Login e cadastro de usuários
-- Aprovação de usuários
-- Dashboard
-- Cadastro/edição/exclusão de demandas
-- Número de processo
-- Número ETC correspondente
-- Prazos e alertas
-- Histórico
-- TCE-SP e AUDESP
-- Pesquisa de demandas
-- Exportação para Excel
-- Leitura de DOE-TCESP por PDF/link

@@ -28,7 +28,6 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
 CAMINHO_ONEDRIVE_WINDOWS = r"C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx"
 PLANILHA = os.environ.get("EXCEL_DATABASE", os.environ.get("DATABASE", CAMINHO_ONEDRIVE_WINDOWS if os.name == "nt" and os.path.exists(CAMINHO_ONEDRIVE_WINDOWS) else "/tmp/sp_aguas.xlsx" if os.environ.get("VERCEL") else "sp_aguas.xlsx"))
-SQLITE_LEGADO = os.environ.get("SQLITE_DATABASE", "sp_aguas.db")
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None
 def _env(*nomes, default=""):
@@ -152,23 +151,6 @@ def _carregar_planilha(conn):
 	return True
 
 
-def _carregar_sqlite_legado(conn):
-	if not os.path.exists(SQLITE_LEGADO) or os.path.abspath(SQLITE_LEGADO) == os.path.abspath(PLANILHA):
-		return
-	legado = sqlite3.connect(SQLITE_LEGADO)
-	legado.row_factory = sqlite3.Row
-	try:
-		for tabela, colunas in TABELAS_EXCEL.items():
-			try:
-				registros = legado.execute(f"SELECT {', '.join(colunas)} FROM {tabela}").fetchall()
-			except sqlite3.OperationalError:
-				continue
-			for registro in registros:
-				conn.execute(f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' for _ in colunas)})", tuple(registro))
-	finally:
-		legado.close()
-
-
 def _salvar_planilha(conn):
 	workbook = Workbook()
 	workbook.remove(workbook.active)
@@ -199,11 +181,13 @@ def _salvar_planilha(conn):
 
 class ConexaoExcel:
 	def __init__(self):
-		self._conn = sqlite3.connect(SQLITE_LEGADO, check_same_thread=False)
+		# SQLite é usado SOMENTE como índice temporário em memória para manter
+		# a aplicação compatível com as consultas existentes. Nenhum arquivo .db
+		# é criado e nenhum dado é persistido no SQLite. A única persistência é o XLSX.
+		self._conn = sqlite3.connect(":memory:", check_same_thread=False)
 		self._conn.row_factory = sqlite3.Row
 		_criar_esquema(self._conn)
-		total = sum(self._conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL)
-		if total == 0 and os.path.exists(PLANILHA):
+		if os.path.exists(PLANILHA):
 			_carregar_planilha(self._conn)
 			self._conn.commit()
 
@@ -290,12 +274,9 @@ def executar_mutacao_atomica(mutator, confirmador=None, tentativas=1):
 			workbook.save(PLANILHA)
 		finally:
 			workbook.close()
-		# Recria o banco SQLite a partir do Excel para manter as duas camadas sincronizadas.
+		# Recria apenas o índice temporário em memória a partir da planilha.
 		if CONEXAO_COMPARTILHADA is not None:
 			CONEXAO_COMPARTILHADA._conn.close()
-		CONEXAO_COMPARTILHADA = None
-		if os.path.exists(SQLITE_LEGADO):
-			os.remove(SQLITE_LEGADO)
 		CONEXAO_COMPARTILHADA = ConexaoExcel()
 		return {"status": "OK", **(resultado if isinstance(resultado, dict) else {"resultado": resultado})}
 
@@ -1207,7 +1188,7 @@ def status():
 	try:
 		conn = conectar()
 		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-		return jsonify({"status": "OK", "modo": "Excel + SQLite local", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "tabelas": contagens, "vercel": bool(os.environ.get("VERCEL"))})
+		return jsonify({"status": "OK", "modo": "Excel local (única persistência)", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "tabelas": contagens, "vercel": bool(os.environ.get("VERCEL"))})
 	except Exception as erro:
 		return jsonify({"status": "ERRO", "erro": str(erro), "arquivo": PLANILHA}), 500
 
@@ -1221,7 +1202,7 @@ def teste_integracao():
 	try:
 		conn = conectar()
 		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-		return jsonify({"status": "SUCESSO", "modo": "Excel + SQLite local", "arquivo": PLANILHA, "tabelas": contagens, "mensagem": "A aplicação está funcionando sem integração externa."})
+		return jsonify({"status": "SUCESSO", "modo": "Excel local (única persistência)", "arquivo": PLANILHA, "tabelas": contagens, "mensagem": "A aplicação está funcionando sem integração externa."})
 	except Exception as erro:
 		return jsonify({"status": "ERRO", "erro": str(erro)}), 500
 
@@ -1239,7 +1220,7 @@ def diagnostico_sync():
 	try:
 		conn = conectar()
 		contagens = {tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0] for tabela in TABELAS_EXCEL}
-		return jsonify({"status": "OK", "somente_leitura": True, "modo": "Excel + SQLite local", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "contagens": contagens, "conclusao": "Diagnóstico concluído sem integração externa."})
+		return jsonify({"status": "OK", "somente_leitura": True, "modo": "Excel local (única persistência)", "arquivo": PLANILHA, "arquivo_existente": os.path.exists(PLANILHA), "contagens": contagens, "conclusao": "Diagnóstico concluído sem integração externa."})
 	except Exception as erro:
 		return jsonify({"status": "FALHA", "erro": str(erro)}), 500
 
