@@ -41,3 +41,7 @@ Na tela Nova Demanda, é possível inserir o link de uma publicação/PDF ou sel
 - bcrypt
 - pypdf
 - requests
+
+
+## Localização automática da planilha
+A aplicação procura primeiro o caminho configurado e depois as variáveis OneDriveCommercial/OneDrive e as pastas padrão do OneDrive, evitando depender do nome exibido no Explorador de Arquivos.

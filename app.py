@@ -12,6 +12,7 @@ import uuid
 from threading import RLock
 from unicodedata import normalize as unicode_normalize
 from urllib.parse import urlparse
+from pathlib import Path
 
 import bcrypt
 import requests
@@ -26,10 +27,56 @@ from flask import Flask, jsonify, redirect, render_template_string, request, sen
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "TROQUE-ESTA-CHAVE-POR-UMA-CHAVE-SECRETA")
-CAMINHO_ONEDRIVE_WINDOWS = r"C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx"
-PLANILHA = CAMINHO_ONEDRIVE_WINDOWS
-# IMPORTANTE: a planilha acima é o único armazenamento permanente do sistema.
-# Não usar DATABASE/EXCEL_DATABASE nem fallback para outro arquivo.
+NOME_PLANILHA = "Sistema de Gestão de Demandas - SP Aguas.xlsx"
+CAMINHO_ONEDRIVE_INFORMADO = r"C:\Users\ana.silva\OneDrive - PRODESP\SP_AGUAS\Sistema de Gestão de Demandas - SP Aguas.xlsx"
+
+
+def localizar_planilha():
+	"""Localiza a planilha real no computador, priorizando o caminho informado."""
+	candidatos = [Path(CAMINHO_ONEDRIVE_INFORMADO)]
+	# O OneDrive corporativo normalmente expõe esta variável no Windows.
+	for variavel in ("OneDriveCommercial", "OneDrive"):
+		valor = os.environ.get(variavel)
+		if valor:
+			candidatos.append(Path(valor) / "SP_AGUAS" / NOME_PLANILHA)
+	# Fallbacks seguros dentro da pasta do usuário, sem procurar no computador inteiro.
+	home = Path.home()
+	for nome in ("OneDrive - PRODESP", "OneDrive"):
+		candidatos.append(home / nome / "SP_AGUAS" / NOME_PLANILHA)
+
+	vistos = set()
+	for candidato in candidatos:
+		chave = str(candidato).lower()
+		if chave in vistos:
+			continue
+		vistos.add(chave)
+		if candidato.is_file():
+			return str(candidato)
+
+	# Se o nome da pasta tiver sido personalizado pelo OneDrive, procura somente
+	# dentro das raízes do OneDrive detectadas e por este nome exato de arquivo.
+	raizes = []
+	for variavel in ("OneDriveCommercial", "OneDrive"):
+		valor = os.environ.get(variavel)
+		if valor:
+			raizes.append(Path(valor))
+	for raiz in (home / "OneDrive - PRODESP", home / "OneDrive"):
+		if raiz.is_dir():
+			raizes.append(raiz)
+	for raiz in raizes:
+		try:
+			for encontrado in raiz.rglob(NOME_PLANILHA):
+				if encontrado.is_file():
+					return str(encontrado)
+		except (OSError, PermissionError):
+			continue
+
+	return str(Path(CAMINHO_ONEDRIVE_INFORMADO))
+
+
+PLANILHA = localizar_planilha()
+# IMPORTANTE: a planilha encontrada acima é o único armazenamento permanente do sistema.
+# Não usar banco em arquivo, Power Automate, Microsoft Graph ou outra planilha como fallback.
 
 ARQUIVO_LOCK = RLock()
 CONEXAO_COMPARTILHADA = None
@@ -1306,8 +1353,10 @@ criar_banco()
 # Diagnóstico inicial: evita que o sistema rode silenciosamente gravando em outro arquivo.
 if not os.path.isfile(PLANILHA):
 	print("\n[ERRO] PLANILHA DO SISTEMA NÃO ENCONTRADA")
-	print(f"[ERRO] Caminho configurado: {PLANILHA}")
-	print("[ERRO] Verifique o OneDrive e confirme se o arquivo está disponível localmente.\n")
+	print(f"[ERRO] Caminho tentado: {PLANILHA}")
+	print(f"[ERRO] Nome procurado: {NOME_PLANILHA}")
+	print(f"[ERRO] Pasta do usuário: {Path.home()}")
+	print("[ERRO] Confirme que o arquivo está sincronizado localmente no OneDrive.\n")
 else:
 	print(f"[OK] Planilha utilizada pelo sistema: {PLANILHA}")
 
